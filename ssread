@@ -384,8 +384,10 @@ load_sessions() {
         [[ "$last_msg" == "null" ]] && last_msg=""
 
         if [[ -n "$SEARCH_QUERY" ]]; then
-            local search_lower="${SEARCH_QUERY,,}"
-            local haystack="${sid,,} ${first_msg,,} ${last_msg,,} ${cwd,,} ${branch,,} ${dir_name,,}"
+            local search_lower
+            search_lower=$(printf '%s' "$SEARCH_QUERY" | tr '[:upper:]' '[:lower:]')
+            local haystack
+            haystack=$(printf '%s' "$sid $first_msg $last_msg $cwd $branch $dir_name" | tr '[:upper:]' '[:lower:]')
             if [[ "$haystack" != *"$search_lower"* ]]; then
                 continue
             fi
@@ -805,8 +807,34 @@ handle_input() {
     esac
 }
 
+# ── Self-Test ──────────────────────────────────────────────────────────────
+run_tests() {
+    local ssread_dir
+    ssread_dir="$(cd "$(dirname "$0")" && pwd)"
+    local test_file="$ssread_dir/tests/test_ssread.sh"
+
+    if [[ ! -f "$test_file" ]]; then
+        echo "Error: test file not found at $test_file"
+        exit 1
+    fi
+
+    if ! command -v bats &>/dev/null; then
+        echo "Error: bats is required to run tests."
+        echo "  brew install bats-core  (macOS)"
+        echo "  apt install bats        (Ubuntu/Debian)"
+        exit 1
+    fi
+
+    exec bats "$test_file"
+}
+
 # ── Main ───────────────────────────────────────────────────────────────────
 main() {
+    # Handle --test before anything else
+    if [[ "${1:-}" == "--test" ]]; then
+        run_tests
+    fi
+
     check_dependencies
 
     if [[ ! -d "$CLAUDE_PROJECTS_DIR" ]]; then

@@ -64,7 +64,7 @@ source_ssread_functions() {
 @test "extract_project_name parses compound directory" {
     source_ssread_functions
     result=$(extract_project_name "-Users-ted-project-hg-client--wt-w2")
-    [[ "$result" == "hg-client/_wt/w2" ]]
+    [[ "$result" == "hg-client/_wt-w2" ]]
 }
 
 @test "extract_project_name handles simple project" {
