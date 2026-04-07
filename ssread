@@ -1,0 +1,647 @@
+#!/usr/bin/env bash
+# ssread — Claude Code session reader TUI
+# Reads ~/.claude/projects/ session data and displays an interactive dashboard
+# Enter to resume session (full-screen), returns to list when claude exits
+
+set -euo pipefail
+
+# ── Configuration ──────────────────────────────────────────────────────────
+CLAUDE_PROJECTS_DIR="$HOME/.claude/projects"
+
+# ── Color & Style ──────────────────────────────────────────────────────────
+BOLD="\033[1m"
+DIM="\033[2m"
+RESET="\033[0m"
+REV="\033[7m"
+FG_CYAN="\033[36m"
+FG_YELLOW="\033[33m"
+FG_GREEN="\033[32m"
+FG_WHITE="\033[37m"
+FG_GRAY="\033[90m"
+FG_BLUE="\033[34m"
+FG_MAGENTA="\033[35m"
+BG_DARK="\033[48;5;235m"
+
+# ── Dependency Check ───────────────────────────────────────────────────────
+check_dependencies() {
+    if ! command -v jq &>/dev/null; then
+        echo "Error: jq is required but not installed."
+        echo "  brew install jq  (macOS)"
+        echo "  apt install jq   (Ubuntu/Debian)"
+        exit 1
+    fi
+}
+
+# ── Terminal Setup ─────────────────────────────────────────────────────────
+TERM_ROWS=0
+TERM_COLS=0
+LEFT_WIDTH=0
+RIGHT_WIDTH=0
+ORIG_STTY=""
+
+setup_terminal() {
+    ORIG_STTY=$(stty -g 2>/dev/null || true)
+    tput smcup        # alternate screen buffer
+    tput civis        # hide cursor
+    stty -echo -icanon min 1 time 0
+    trap cleanup EXIT INT TERM
+}
+
+restore_terminal_for_session() {
+    tput rmcup        # leave alternate screen
+    tput cnorm        # show cursor
+    if [[ -n "$ORIG_STTY" ]]; then
+        stty "$ORIG_STTY" 2>/dev/null || true
+    else
+        stty echo icanon 2>/dev/null || true
+    fi
+}
+
+restore_terminal_for_tui() {
+    tput smcup        # re-enter alternate screen
+    tput civis        # hide cursor
+    stty -echo -icanon min 1 time 0
+}
+
+cleanup() {
+    tput rmcup        # restore screen
+    tput cnorm        # show cursor
+    if [[ -n "$ORIG_STTY" ]]; then
+        stty "$ORIG_STTY" 2>/dev/null || true
+    else
+        stty echo icanon 2>/dev/null || true
+    fi
+}
+
+get_dimensions() {
+    TERM_ROWS=$(tput lines)
+    TERM_COLS=$(tput cols)
+    LEFT_WIDTH=$(( TERM_COLS * 45 / 100 ))
+    RIGHT_WIDTH=$(( TERM_COLS - LEFT_WIDTH - 1 ))  # -1 for divider
+}
+
+# ── Cursor & Drawing Helpers ───────────────────────────────────────────────
+move_to() { printf "\033[%d;%dH" "$1" "$2"; }
+clear_screen() { printf "\033[2J\033[H"; }
+
+draw_vline() {
+    local col=$1 start_row=$2 end_row=$3 char="${4:-│}"
+    for (( r=start_row; r<=end_row; r++ )); do
+        move_to "$r" "$col"
+        printf "%s" "$char"
+    done
+}
+
+print_at() {
+    local row=$1 col=$2 max_width=$3
+    shift 3
+    local text="$*"
+    move_to "$row" "$col"
+    printf "%-${max_width}.${max_width}s" "$text"
+}
+
+print_at_styled() {
+    local row=$1 col=$2 max_width=$3 style=$4
+    shift 4
+    local text="$*"
+    move_to "$row" "$col"
+    printf "${style}%-${max_width}.${max_width}s${RESET}" "$text"
+}
+
+# ── Time Helpers ───────────────────────────────────────────────────────────
+now_epoch() {
+    date +%s
+}
+
+iso_to_epoch() {
+    local ts="$1"
+    if [[ "$OSTYPE" == darwin* ]]; then
+        local clean="${ts%%.*}"
+        clean="${clean}Z"
+        date -j -f "%Y-%m-%dT%H:%M:%SZ" "$clean" +%s 2>/dev/null || echo 0
+    else
+        date -d "$ts" +%s 2>/dev/null || echo 0
+    fi
+}
+
+format_elapsed() {
+    local epoch="$1"
+    local now
+    now=$(now_epoch)
+    local diff=$(( now - epoch ))
+
+    if (( diff < 60 )); then
+        echo "${diff}s ago"
+    elif (( diff < 3600 )); then
+        echo "$(( diff / 60 ))m ago"
+    elif (( diff < 86400 )); then
+        echo "$(( diff / 3600 ))h ago"
+    elif (( diff < 604800 )); then
+        echo "$(( diff / 86400 ))d ago"
+    else
+        echo "$(( diff / 604800 ))w ago"
+    fi
+}
+
+format_datetime() {
+    local ts="$1"
+    local clean="${ts%%.*}"
+    clean="${clean//T/ }"
+    clean="${clean//Z/}"
+    echo "${clean:0:16}"
+}
+
+# ── Session Data ───────────────────────────────────────────────────────────
+declare -a SESSION_FILES=()
+declare -a SESSION_IDS=()
+declare -a SESSION_TYPES=()
+declare -a SESSION_ELAPSED=()
+declare -a SESSION_DIRS=()
+declare -a SESSION_LAST_MSG=()
+declare -a SESSION_TIMESTAMPS=()
+declare -a SESSION_PROJECTS=()
+declare -a SESSION_BRANCHES=()
+declare -a SESSION_VERSIONS=()
+declare -a SESSION_FIRST_MSG=()
+declare -a SESSION_MSG_COUNTS=()
+declare -a SESSION_CWDS=()
+declare -a SESSION_EPOCH=()
+
+SESSION_COUNT=0
+SELECTED=0
+SCROLL_OFFSET=0
+SEARCH_QUERY=""
+SEARCH_MODE=false
+
+# Extract project name from the directory name
+extract_project_name() {
+    local dir_name="$1"
+    local stripped="${dir_name#-Users-ted-}"
+    stripped="${stripped#project-}"
+    echo "$stripped" | sed 's/--/\/_/g'
+}
+
+load_sessions() {
+    SESSION_FILES=()
+    SESSION_IDS=()
+    SESSION_TYPES=()
+    SESSION_ELAPSED=()
+    SESSION_DIRS=()
+    SESSION_LAST_MSG=()
+    SESSION_TIMESTAMPS=()
+    SESSION_PROJECTS=()
+    SESSION_BRANCHES=()
+    SESSION_VERSIONS=()
+    SESSION_FIRST_MSG=()
+    SESSION_MSG_COUNTS=()
+    SESSION_CWDS=()
+    SESSION_EPOCH=()
+    SESSION_COUNT=0
+
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -name "*.jsonl" ! -path "*/subagents/*" -print0 2>/dev/null \
+        | xargs -0 ls -t 2>/dev/null > "$tmpfile" || true
+
+    while IFS= read -r filepath; do
+        [[ -z "$filepath" ]] && continue
+
+        local dir_name
+        dir_name=$(basename "$(dirname "$filepath")")
+        local file_name
+        file_name=$(basename "$filepath" .jsonl)
+
+        local session_data
+        session_data=$(jq -r -s '
+            [.[] | select(.type == "user")] |
+            if length == 0 then
+                {sid: "", etype: "", ts: "", cwd: "", branch: "", ver: "", first_msg: "", last_msg: "", count: 0}
+            else
+                {
+                    sid: (.[0].sessionId // ""),
+                    etype: (.[0].entrypoint // "cli"),
+                    ts: (.[0].timestamp // ""),
+                    cwd: (.[0].cwd // ""),
+                    branch: (.[0].gitBranch // ""),
+                    ver: (.[0].version // ""),
+                    first_msg: ((.[0].message.content // "") | if type == "string" then . else (.[0] // "" | tostring) end | .[0:120]),
+                    last_msg: ((.[length-1].message.content // "") | if type == "string" then . else (.[0] // "" | tostring) end | .[0:120]),
+                    count: length
+                }
+            end
+        ' "$filepath" 2>/dev/null) || continue
+
+        local sid etype ts cwd branch ver first_msg last_msg msg_count
+        sid=$(echo "$session_data" | jq -r '.sid')
+        etype=$(echo "$session_data" | jq -r '.etype')
+        ts=$(echo "$session_data" | jq -r '.ts')
+        cwd=$(echo "$session_data" | jq -r '.cwd')
+        branch=$(echo "$session_data" | jq -r '.branch')
+        ver=$(echo "$session_data" | jq -r '.ver')
+        first_msg=$(echo "$session_data" | jq -r '.first_msg')
+        last_msg=$(echo "$session_data" | jq -r '.last_msg')
+        msg_count=$(echo "$session_data" | jq -r '.count')
+
+        [[ -z "$sid" || "$sid" == "null" ]] && sid="$file_name"
+        [[ "$ts" == "null" ]] && ts=""
+        [[ "$cwd" == "null" ]] && cwd=""
+        [[ "$branch" == "null" ]] && branch=""
+        [[ "$ver" == "null" ]] && ver=""
+        [[ "$first_msg" == "null" ]] && first_msg=""
+        [[ "$last_msg" == "null" ]] && last_msg=""
+
+        if [[ -n "$SEARCH_QUERY" ]]; then
+            local search_lower="${SEARCH_QUERY,,}"
+            local haystack="${sid,,} ${first_msg,,} ${last_msg,,} ${cwd,,} ${branch,,} ${dir_name,,}"
+            if [[ "$haystack" != *"$search_lower"* ]]; then
+                continue
+            fi
+        fi
+
+        local epoch=0
+        if [[ -n "$ts" ]]; then
+            epoch=$(iso_to_epoch "$ts")
+        fi
+
+        local project_name
+        project_name=$(extract_project_name "$dir_name")
+
+        SESSION_FILES+=("$filepath")
+        SESSION_IDS+=("$sid")
+        SESSION_TYPES+=("$etype")
+        SESSION_TIMESTAMPS+=("$ts")
+        SESSION_DIRS+=("$dir_name")
+        SESSION_LAST_MSG+=("$last_msg")
+        SESSION_PROJECTS+=("$project_name")
+        SESSION_BRANCHES+=("$branch")
+        SESSION_VERSIONS+=("$ver")
+        SESSION_FIRST_MSG+=("$first_msg")
+        SESSION_MSG_COUNTS+=("$msg_count")
+        SESSION_CWDS+=("$cwd")
+        SESSION_EPOCH+=("$epoch")
+
+        if [[ -n "$ts" && "$epoch" -gt 0 ]]; then
+            SESSION_ELAPSED+=("$(format_elapsed "$epoch")")
+        else
+            SESSION_ELAPSED+=("?")
+        fi
+
+        SESSION_COUNT=$(( SESSION_COUNT + 1 ))
+    done < "$tmpfile"
+
+    rm -f "$tmpfile"
+}
+
+# ── Session Launch ─────────────────────────────────────────────────────────
+launch_session() {
+    local sid="$1"
+    local cwd="$2"
+
+    restore_terminal_for_session
+    clear_screen
+
+    printf "${FG_GRAY}ssread: session ${sid:0:8}${RESET}\n\n"
+
+    if [[ -n "$cwd" && -d "$cwd" ]]; then
+        cd "$cwd"
+    fi
+
+    set +e
+    claude --resume "$sid"
+    set -e
+
+    # Claude exited — return to TUI
+    restore_terminal_for_tui
+    clear_screen
+}
+
+# ── Drawing ────────────────────────────────────────────────────────────────
+draw_border() {
+    move_to 1 1
+    printf "┌"
+    printf "%0.s─" $(seq 1 "$LEFT_WIDTH")
+    printf "┬"
+    printf "%0.s─" $(seq 1 "$RIGHT_WIDTH")
+    printf "┐"
+
+    draw_vline 1 2 $(( TERM_ROWS - 2 )) "│"
+    draw_vline $(( LEFT_WIDTH + 2 )) 2 $(( TERM_ROWS - 2 )) "│"
+    draw_vline $(( TERM_COLS )) 2 $(( TERM_ROWS - 2 )) "│"
+
+    move_to $(( TERM_ROWS - 1 )) 1
+    printf "└"
+    printf "%0.s─" $(seq 1 "$LEFT_WIDTH")
+    printf "┴"
+    printf "%0.s─" $(seq 1 "$RIGHT_WIDTH")
+    printf "┘"
+}
+
+draw_left_header() {
+    local title
+    if [[ -n "$SEARCH_QUERY" ]]; then
+        title=" Sessions [$SEARCH_QUERY] ($SESSION_COUNT)"
+    else
+        title=" Sessions ($SESSION_COUNT)"
+    fi
+    print_at_styled 1 2 "$LEFT_WIDTH" "${BOLD}${FG_CYAN}" "$title"
+}
+
+draw_right_header() {
+    print_at_styled 1 $(( LEFT_WIDTH + 3 )) "$RIGHT_WIDTH" "${BOLD}${FG_CYAN}" " Detail"
+}
+
+draw_session_list() {
+    local visible_rows=$(( TERM_ROWS - 4 ))
+    local max_display=$(( visible_rows / 2 ))
+
+    if (( SELECTED < SCROLL_OFFSET )); then
+        SCROLL_OFFSET=$SELECTED
+    elif (( SELECTED >= SCROLL_OFFSET + max_display )); then
+        SCROLL_OFFSET=$(( SELECTED - max_display + 1 ))
+    fi
+
+    local row=2
+    for (( i=SCROLL_OFFSET; i < SESSION_COUNT && row < TERM_ROWS - 2; i++ )); do
+        local sid_short="${SESSION_IDS[$i]:0:8}"
+        local etype="${SESSION_TYPES[$i]}"
+        local elapsed="${SESSION_ELAPSED[$i]}"
+        local project="${SESSION_PROJECTS[$i]}"
+        local last_msg="${SESSION_LAST_MSG[$i]}"
+
+        local line1
+        if (( i == SELECTED )); then
+            line1=$(printf " ▶ %-8s  %-4s  %-8s  %s" "$sid_short" "$etype" "$elapsed" "$project")
+            print_at_styled "$row" 2 "$LEFT_WIDTH" "${BOLD}${REV}${FG_WHITE}" "$line1"
+        else
+            line1=$(printf "   %-8s  %-4s  %-8s  %s" "$sid_short" "$etype" "$elapsed" "$project")
+            print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_WHITE}" "$line1"
+        fi
+        row=$(( row + 1 ))
+
+        local line2="     ${last_msg}"
+        if (( i == SELECTED )); then
+            print_at_styled "$row" 2 "$LEFT_WIDTH" "${REV}${FG_GRAY}" "$line2"
+        else
+            print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_GRAY}" "$line2"
+        fi
+        row=$(( row + 1 ))
+    done
+
+    while (( row < TERM_ROWS - 1 )); do
+        print_at "$row" 2 "$LEFT_WIDTH" ""
+        row=$(( row + 1 ))
+    done
+}
+
+draw_detail_panel() {
+    local col=$(( LEFT_WIDTH + 3 ))
+    local width=$(( RIGHT_WIDTH - 2 ))
+    local row=2
+
+    if (( SESSION_COUNT == 0 )); then
+        print_at_styled "$row" "$col" "$width" "${FG_GRAY}" "  No sessions found."
+        row=$(( row + 1 ))
+        while (( row < TERM_ROWS - 1 )); do
+            print_at "$row" "$col" "$width" ""
+            row=$(( row + 1 ))
+        done
+        return
+    fi
+
+    local i=$SELECTED
+    local sid="${SESSION_IDS[$i]}"
+    local etype="${SESSION_TYPES[$i]}"
+    local project="${SESSION_PROJECTS[$i]}"
+    local branch="${SESSION_BRANCHES[$i]}"
+    local cwd="${SESSION_CWDS[$i]}"
+    local ts="${SESSION_TIMESTAMPS[$i]}"
+    local ver="${SESSION_VERSIONS[$i]}"
+    local first_msg="${SESSION_FIRST_MSG[$i]}"
+    local last_msg="${SESSION_LAST_MSG[$i]}"
+    local msg_count="${SESSION_MSG_COUNTS[$i]}"
+
+    print_at_styled "$row" "$col" "$width" "${BOLD}${FG_YELLOW}" "  Session"
+    row=$(( row + 1 ))
+    print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid"
+    row=$(( row + 2 ))
+
+    print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Project   ${RESET}${FG_WHITE}$project"
+    row=$(( row + 1 ))
+
+    if [[ -n "$branch" ]]; then
+        print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Branch    ${RESET}${FG_GREEN}$branch"
+        row=$(( row + 1 ))
+    fi
+
+    if [[ -n "$cwd" ]]; then
+        print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  CWD       ${RESET}${FG_WHITE}$cwd"
+        row=$(( row + 1 ))
+    fi
+
+    print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Type      ${RESET}${FG_WHITE}$etype"
+    row=$(( row + 1 ))
+    if [[ -n "$ver" ]]; then
+        print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Version   ${RESET}${FG_WHITE}$ver"
+        row=$(( row + 1 ))
+    fi
+
+    if [[ -n "$ts" ]]; then
+        local formatted
+        formatted=$(format_datetime "$ts")
+        print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Started   ${RESET}${FG_WHITE}$formatted"
+        row=$(( row + 1 ))
+    fi
+
+    print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Messages  ${RESET}${FG_WHITE}$msg_count user messages"
+    row=$(( row + 2 ))
+
+    print_at_styled "$row" "$col" "$width" "${BOLD}${FG_MAGENTA}" "  ── First Message ──"
+    row=$(( row + 1 ))
+    local remaining="$first_msg"
+    local line_width=$(( width - 4 ))
+    while [[ -n "$remaining" ]] && (( row < TERM_ROWS - 8 )); do
+        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  ${remaining:0:$line_width}"
+        remaining="${remaining:$line_width}"
+        row=$(( row + 1 ))
+    done
+    row=$(( row + 1 ))
+
+    if [[ "$first_msg" != "$last_msg" ]] && [[ -n "$last_msg" ]]; then
+        print_at_styled "$row" "$col" "$width" "${BOLD}${FG_MAGENTA}" "  ── Last Message ──"
+        row=$(( row + 1 ))
+        remaining="$last_msg"
+        while [[ -n "$remaining" ]] && (( row < TERM_ROWS - 3 )); do
+            print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  ${remaining:0:$line_width}"
+            remaining="${remaining:$line_width}"
+            row=$(( row + 1 ))
+        done
+    fi
+
+    while (( row < TERM_ROWS - 1 )); do
+        print_at "$row" "$col" "$width" ""
+        row=$(( row + 1 ))
+    done
+}
+
+draw_status_bar() {
+    local bar_row=$TERM_ROWS
+    move_to "$bar_row" 1
+    if $SEARCH_MODE; then
+        printf "${REV}${FG_WHITE} /%-$(( TERM_COLS - 2 ))s${RESET}" "$SEARCH_QUERY"
+    else
+        local bar_text=" ↑↓ Navigate  Enter: Resume  q: Quit  /: Search  r: Refresh  Esc: Clear search"
+        printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
+    fi
+}
+
+draw_loading() {
+    clear_screen
+    local mid_row=$(( TERM_ROWS / 2 ))
+    local mid_col=$(( TERM_COLS / 2 - 12 ))
+    move_to "$mid_row" "$mid_col"
+    printf "${BOLD}${FG_CYAN}ssread${RESET}${FG_GRAY} loading sessions...${RESET}"
+}
+
+render() {
+    get_dimensions
+    local buf
+    buf=$(
+        draw_border
+        draw_left_header
+        draw_right_header
+        draw_session_list
+        draw_detail_panel
+        draw_status_bar
+    )
+    printf "%s" "$buf"
+}
+
+# ── Input Handling ─────────────────────────────────────────────────────────
+_KEY=""
+
+read_key() {
+    _KEY=""
+    local c
+    IFS= read -rsn1 c || true
+    if [[ "$c" == $'\x1b' ]]; then
+        local seq=""
+        IFS= read -rsn1 -t 1 seq || true
+        if [[ "$seq" == "[" ]]; then
+            local code=""
+            IFS= read -rsn1 -t 1 code || true
+            _KEY="ESC[${code}"
+        else
+            _KEY="ESC"
+        fi
+    elif [[ "$c" == "" ]]; then
+        _KEY="ENTER"
+    else
+        _KEY="$c"
+    fi
+}
+
+handle_search_input() {
+    case "$_KEY" in
+        ESC|ENTER)
+            SEARCH_MODE=false
+            ;;
+        $'\x7f'|$'\b')
+            SEARCH_QUERY="${SEARCH_QUERY%?}"
+            SELECTED=0
+            SCROLL_OFFSET=0
+            load_sessions
+            ;;
+        *)
+            if [[ ${#_KEY} -eq 1 ]] && [[ "$_KEY" =~ [[:print:]] ]]; then
+                SEARCH_QUERY="${SEARCH_QUERY}${_KEY}"
+                SELECTED=0
+                SCROLL_OFFSET=0
+                load_sessions
+            fi
+            ;;
+    esac
+}
+
+handle_input() {
+    read_key
+
+    if $SEARCH_MODE; then
+        handle_search_input
+        return
+    fi
+
+    case "$_KEY" in
+        "ESC[A"|k)
+            if (( SELECTED > 0 )); then
+                SELECTED=$(( SELECTED - 1 ))
+            fi
+            ;;
+        "ESC[B"|j)
+            if (( SELECTED < SESSION_COUNT - 1 )); then
+                SELECTED=$(( SELECTED + 1 ))
+            fi
+            ;;
+        ENTER)
+            if (( SESSION_COUNT > 0 )); then
+                local sid="${SESSION_IDS[$SELECTED]}"
+                local cwd="${SESSION_CWDS[$SELECTED]}"
+                launch_session "$sid" "$cwd"
+            fi
+            ;;
+        q)
+            exit 0
+            ;;
+        /)
+            SEARCH_MODE=true
+            SEARCH_QUERY=""
+            ;;
+        ESC)
+            if [[ -n "$SEARCH_QUERY" ]]; then
+                SEARCH_QUERY=""
+                SELECTED=0
+                SCROLL_OFFSET=0
+                load_sessions
+            fi
+            ;;
+        r)
+            SELECTED=0
+            SCROLL_OFFSET=0
+            draw_loading
+            load_sessions
+            ;;
+        g)
+            SELECTED=0
+            SCROLL_OFFSET=0
+            ;;
+        G)
+            if (( SESSION_COUNT > 0 )); then
+                SELECTED=$(( SESSION_COUNT - 1 ))
+            fi
+            ;;
+    esac
+}
+
+# ── Main ───────────────────────────────────────────────────────────────────
+main() {
+    check_dependencies
+
+    if [[ ! -d "$CLAUDE_PROJECTS_DIR" ]]; then
+        echo "Error: $CLAUDE_PROJECTS_DIR not found."
+        echo "No Claude Code session data available."
+        exit 1
+    fi
+
+    setup_terminal
+    get_dimensions
+    draw_loading
+    load_sessions
+    clear_screen
+
+    while true; do
+        render
+        handle_input
+    done
+}
+
+main "$@"
