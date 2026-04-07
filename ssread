@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# ssread — Claude Code session reader TUI
-# Reads ~/.claude/projects/ session data and displays an interactive dashboard
-# Enter to resume session (full-screen), returns to list when claude exits
+# ssread — Claude Code session manager TUI
+# Browse sessions from ~/.claude/projects/ and launch them in tmux windows
+# Each session runs in its own tmux window for parallel task management
 
 set -euo pipefail
 
 # ── Configuration ──────────────────────────────────────────────────────────
 CLAUDE_PROJECTS_DIR="$HOME/.claude/projects"
+SSREAD_TMUX_SESSION="ssread"
+SSREAD_INSIDE_TMUX="${SSREAD_INSIDE_TMUX:-}"
 
 # ── Color & Style ──────────────────────────────────────────────────────────
 BOLD="\033[1m"
@@ -24,12 +26,145 @@ BG_DARK="\033[48;5;235m"
 
 # ── Dependency Check ───────────────────────────────────────────────────────
 check_dependencies() {
-    if ! command -v jq &>/dev/null; then
-        echo "Error: jq is required but not installed."
-        echo "  brew install jq  (macOS)"
-        echo "  apt install jq   (Ubuntu/Debian)"
+    local missing=()
+    command -v jq &>/dev/null || missing+=("jq")
+    command -v tmux &>/dev/null || missing+=("tmux")
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "Error: missing dependencies: ${missing[*]}"
+        echo "  brew install ${missing[*]}  (macOS)"
+        echo "  apt install ${missing[*]}   (Ubuntu/Debian)"
         exit 1
     fi
+}
+
+# ── tmux Bootstrap ─────────────────────────────────────────────────────────
+# If not inside our tmux session, create/attach to one and re-exec ssread inside it.
+ensure_tmux_session() {
+    # Already inside our tmux session — nothing to do
+    if [[ -n "$SSREAD_INSIDE_TMUX" ]]; then
+        return
+    fi
+
+    # Already in tmux but not our session — create a new session grouped or standalone
+    if [[ -n "${TMUX:-}" ]]; then
+        # We're in some other tmux session. Warn and launch inside current tmux.
+        SSREAD_INSIDE_TMUX=1
+        return
+    fi
+
+    # Not in tmux at all — create or attach to ssread session
+    if tmux has-session -t "$SSREAD_TMUX_SESSION" 2>/dev/null; then
+        # Session exists — attach to it (ssread TUI should be in window 0)
+        exec tmux attach-session -t "$SSREAD_TMUX_SESSION"
+    else
+        # Create new session with ssread TUI in window 0
+        exec tmux new-session -s "$SSREAD_TMUX_SESSION" -n "list" \
+            "SSREAD_INSIDE_TMUX=1 $(printf '%q' "$0") $(printf '%q ' "$@")"
+    fi
+}
+
+# ── tmux Window Management ────────────────────────────────────────────────
+TMUX_SESSION_NAME=""
+
+# Get the tmux session name we're running in
+get_tmux_session_name() {
+    if [[ -n "${TMUX:-}" ]]; then
+        TMUX_SESSION_NAME=$(tmux display-message -p '#S' 2>/dev/null || echo "")
+    else
+        TMUX_SESSION_NAME=""
+    fi
+}
+
+# Check if a claude session is already running in a tmux window.
+# Returns the window index if found, empty string if not.
+tmux_find_session_window() {
+    local sid="$1"
+    local sid_short="${sid:0:8}"
+
+    if [[ -z "${TMUX:-}" ]]; then
+        echo ""
+        return
+    fi
+
+    # Search window names for our session ID prefix
+    tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_index} #{window_name}' 2>/dev/null \
+        | while IFS=' ' read -r idx name; do
+            if [[ "$name" == "$sid_short" ]]; then
+                echo "$idx"
+                return
+            fi
+        done
+}
+
+# Get list of all active session IDs (running in tmux windows)
+tmux_active_session_ids() {
+    if [[ -z "${TMUX:-}" ]]; then
+        return
+    fi
+
+    tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name}' 2>/dev/null \
+        | grep -v '^list$' || true
+}
+
+# Launch a claude session in a new tmux window
+tmux_launch_session() {
+    local sid="$1"
+    local cwd="$2"
+    local sid_short="${sid:0:8}"
+
+    if [[ -z "${TMUX:-}" ]]; then
+        # Fallback: not in tmux, launch directly (old behavior)
+        launch_session_direct "$sid" "$cwd"
+        return
+    fi
+
+    local cd_cmd=""
+    if [[ -n "$cwd" && -d "$cwd" ]]; then
+        cd_cmd="cd $(printf '%q' "$cwd") && "
+    fi
+
+    tmux new-window -t "$TMUX_SESSION_NAME" -n "$sid_short" \
+        "${cd_cmd}claude --resume '$sid'; echo ''; echo 'Session ended. Press any key to close.'; read -rsn1"
+}
+
+# Switch to an existing tmux window running a session
+tmux_switch_to_window() {
+    local window_idx="$1"
+    tmux select-window -t "$TMUX_SESSION_NAME:$window_idx" 2>/dev/null || true
+}
+
+# Switch back to ssread list window (window 0 / "list")
+tmux_switch_to_list() {
+    tmux select-window -t "$TMUX_SESSION_NAME:list" 2>/dev/null \
+        || tmux select-window -t "$TMUX_SESSION_NAME:0" 2>/dev/null || true
+}
+
+# Kill all claude windows (not the list window)
+tmux_kill_all_sessions() {
+    if [[ -z "${TMUX:-}" ]]; then
+        return
+    fi
+
+    tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_index} #{window_name}' 2>/dev/null \
+        | while IFS=' ' read -r idx name; do
+            if [[ "$name" != "list" ]]; then
+                tmux kill-window -t "$TMUX_SESSION_NAME:$idx" 2>/dev/null || true
+            fi
+        done
+}
+
+# Count active claude windows
+tmux_active_count() {
+    if [[ -z "${TMUX:-}" ]]; then
+        echo 0
+        return
+    fi
+
+    local count
+    count=$(tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name}' 2>/dev/null \
+        | grep -cv '^list$' 2>/dev/null || echo 0)
+    echo "$count"
 }
 
 # ── Terminal Setup ─────────────────────────────────────────────────────────
@@ -47,22 +182,6 @@ setup_terminal() {
     trap cleanup EXIT INT TERM
 }
 
-restore_terminal_for_session() {
-    tput rmcup        # leave alternate screen
-    tput cnorm        # show cursor
-    if [[ -n "$ORIG_STTY" ]]; then
-        stty "$ORIG_STTY" 2>/dev/null || true
-    else
-        stty echo icanon 2>/dev/null || true
-    fi
-}
-
-restore_terminal_for_tui() {
-    tput smcup        # re-enter alternate screen
-    tput civis        # hide cursor
-    stty -echo -icanon min 1 time 0
-}
-
 cleanup() {
     tput rmcup        # restore screen
     tput cnorm        # show cursor
@@ -77,7 +196,7 @@ get_dimensions() {
     TERM_ROWS=$(tput lines)
     TERM_COLS=$(tput cols)
     LEFT_WIDTH=$(( TERM_COLS * 45 / 100 ))
-    RIGHT_WIDTH=$(( TERM_COLS - LEFT_WIDTH - 1 ))  # -1 for divider
+    RIGHT_WIDTH=$(( TERM_COLS - LEFT_WIDTH - 1 ))
 }
 
 # ── Cursor & Drawing Helpers ───────────────────────────────────────────────
@@ -109,9 +228,7 @@ print_at_styled() {
 }
 
 # ── Time Helpers ───────────────────────────────────────────────────────────
-now_epoch() {
-    date +%s
-}
+now_epoch() { date +%s; }
 
 iso_to_epoch() {
     local ts="$1"
@@ -130,16 +247,11 @@ format_elapsed() {
     now=$(now_epoch)
     local diff=$(( now - epoch ))
 
-    if (( diff < 60 )); then
-        echo "${diff}s ago"
-    elif (( diff < 3600 )); then
-        echo "$(( diff / 60 ))m ago"
-    elif (( diff < 86400 )); then
-        echo "$(( diff / 3600 ))h ago"
-    elif (( diff < 604800 )); then
-        echo "$(( diff / 86400 ))d ago"
-    else
-        echo "$(( diff / 604800 ))w ago"
+    if (( diff < 60 )); then echo "${diff}s ago"
+    elif (( diff < 3600 )); then echo "$(( diff / 60 ))m ago"
+    elif (( diff < 86400 )); then echo "$(( diff / 3600 ))h ago"
+    elif (( diff < 604800 )); then echo "$(( diff / 86400 ))d ago"
+    else echo "$(( diff / 604800 ))w ago"
     fi
 }
 
@@ -173,7 +285,27 @@ SCROLL_OFFSET=0
 SEARCH_QUERY=""
 SEARCH_MODE=false
 
-# Extract project name from the directory name
+# Cache of active tmux window names (refreshed periodically)
+ACTIVE_WINDOWS=""
+ACTIVE_WINDOWS_LAST_REFRESH=0
+
+refresh_active_windows() {
+    local now
+    now=$(now_epoch)
+    # Refresh at most every 2 seconds
+    if (( now - ACTIVE_WINDOWS_LAST_REFRESH < 2 )); then
+        return
+    fi
+    ACTIVE_WINDOWS=$(tmux_active_session_ids)
+    ACTIVE_WINDOWS_LAST_REFRESH=$now
+}
+
+is_session_active() {
+    local sid="$1"
+    local sid_short="${sid:0:8}"
+    echo "$ACTIVE_WINDOWS" | grep -qF "$sid_short" 2>/dev/null
+}
+
 extract_project_name() {
     local dir_name="$1"
     local stripped="${dir_name#-Users-ted-}"
@@ -293,12 +425,16 @@ load_sessions() {
     rm -f "$tmpfile"
 }
 
-# ── Session Launch ─────────────────────────────────────────────────────────
-launch_session() {
+# ── Session Launch (fallback for non-tmux) ─────────────────────────────────
+launch_session_direct() {
     local sid="$1"
     local cwd="$2"
 
-    restore_terminal_for_session
+    tput rmcup
+    tput cnorm
+    if [[ -n "$ORIG_STTY" ]]; then
+        stty "$ORIG_STTY" 2>/dev/null || true
+    fi
     clear_screen
 
     printf "${FG_GRAY}ssread: session ${sid:0:8}${RESET}\n\n"
@@ -311,8 +447,9 @@ launch_session() {
     claude --resume "$sid"
     set -e
 
-    # Claude exited — return to TUI
-    restore_terminal_for_tui
+    tput smcup
+    tput civis
+    stty -echo -icanon min 1 time 0
     clear_screen
 }
 
@@ -338,9 +475,13 @@ draw_border() {
 }
 
 draw_left_header() {
+    local active_count
+    active_count=$(tmux_active_count)
     local title
     if [[ -n "$SEARCH_QUERY" ]]; then
         title=" Sessions [$SEARCH_QUERY] ($SESSION_COUNT)"
+    elif (( active_count > 0 )); then
+        title=" Sessions ($SESSION_COUNT)  ${FG_GREEN}▸ $active_count running"
     else
         title=" Sessions ($SESSION_COUNT)"
     fi
@@ -369,13 +510,24 @@ draw_session_list() {
         local project="${SESSION_PROJECTS[$i]}"
         local last_msg="${SESSION_LAST_MSG[$i]}"
 
+        # Running indicator
+        local run_mark=""
+        if is_session_active "${SESSION_IDS[$i]}"; then
+            run_mark=" ▸"
+        fi
+
         local line1
         if (( i == SELECTED )); then
-            line1=$(printf " ▶ %-8s  %-4s  %-8s  %s" "$sid_short" "$etype" "$elapsed" "$project")
+            line1=$(printf " ▶ %-8s  %-4s  %-8s  %s%s" "$sid_short" "$etype" "$elapsed" "$project" "$run_mark")
             print_at_styled "$row" 2 "$LEFT_WIDTH" "${BOLD}${REV}${FG_WHITE}" "$line1"
         else
-            line1=$(printf "   %-8s  %-4s  %-8s  %s" "$sid_short" "$etype" "$elapsed" "$project")
-            print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_WHITE}" "$line1"
+            if [[ -n "$run_mark" ]]; then
+                line1=$(printf "   %-8s  %-4s  %-8s  %s%s" "$sid_short" "$etype" "$elapsed" "$project" "$run_mark")
+                print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_GREEN}" "$line1"
+            else
+                line1=$(printf "   %-8s  %-4s  %-8s  %s" "$sid_short" "$etype" "$elapsed" "$project")
+                print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_WHITE}" "$line1"
+            fi
         fi
         row=$(( row + 1 ))
 
@@ -423,7 +575,12 @@ draw_detail_panel() {
 
     print_at_styled "$row" "$col" "$width" "${BOLD}${FG_YELLOW}" "  Session"
     row=$(( row + 1 ))
-    print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid"
+
+    if is_session_active "$sid"; then
+        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_GREEN}▸ running"
+    else
+        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid"
+    fi
     row=$(( row + 2 ))
 
     print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Project   ${RESET}${FG_WHITE}$project"
@@ -490,7 +647,7 @@ draw_status_bar() {
     if $SEARCH_MODE; then
         printf "${REV}${FG_WHITE} /%-$(( TERM_COLS - 2 ))s${RESET}" "$SEARCH_QUERY"
     else
-        local bar_text=" ↑↓ Navigate  Enter: Resume  q: Quit  /: Search  r: Refresh  Esc: Clear search"
+        local bar_text=" ↑↓ Navigate  Enter: Open  Tab: Next window  q: Quit  Q: Quit all  /: Search  r: Refresh"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     fi
 }
@@ -505,6 +662,7 @@ draw_loading() {
 
 render() {
     get_dimensions
+    refresh_active_windows
     local buf
     buf=$(
         draw_border
@@ -534,6 +692,8 @@ read_key() {
         else
             _KEY="ESC"
         fi
+    elif [[ "$c" == $'\t' ]]; then
+        _KEY="TAB"
     elif [[ "$c" == "" ]]; then
         _KEY="ENTER"
     else
@@ -586,10 +746,32 @@ handle_input() {
             if (( SESSION_COUNT > 0 )); then
                 local sid="${SESSION_IDS[$SELECTED]}"
                 local cwd="${SESSION_CWDS[$SELECTED]}"
-                launch_session "$sid" "$cwd"
+
+                # Check if session is already running in a tmux window
+                local existing_window
+                existing_window=$(tmux_find_session_window "$sid")
+
+                if [[ -n "$existing_window" ]]; then
+                    # Switch to existing window
+                    tmux_switch_to_window "$existing_window"
+                else
+                    # Launch in new tmux window
+                    tmux_launch_session "$sid" "$cwd"
+                fi
+            fi
+            ;;
+        TAB)
+            # Switch to next tmux window
+            if [[ -n "${TMUX:-}" ]]; then
+                tmux next-window 2>/dev/null || true
             fi
             ;;
         q)
+            exit 0
+            ;;
+        Q)
+            # Kill all claude windows then quit
+            tmux_kill_all_sessions
             exit 0
             ;;
         /)
@@ -607,6 +789,7 @@ handle_input() {
         r)
             SELECTED=0
             SCROLL_OFFSET=0
+            ACTIVE_WINDOWS_LAST_REFRESH=0
             draw_loading
             load_sessions
             ;;
@@ -632,6 +815,10 @@ main() {
         exit 1
     fi
 
+    # Bootstrap into tmux if not already inside
+    ensure_tmux_session "$@"
+
+    get_tmux_session_name
     setup_terminal
     get_dimensions
     draw_loading

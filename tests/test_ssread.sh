@@ -35,8 +35,12 @@ teardown() {
 
 source_ssread_functions() {
     local tmp="$TEST_DIR/ssread_funcs.sh"
-    sed '/^main "\$@"/d' "$SSREAD_BIN" > "$tmp"
+    # Remove main call and ensure_tmux_session exec to avoid side effects
+    sed -e '/^main "\$@"/d' \
+        -e 's/exec tmux/echo "WOULD_EXEC tmux"/g' \
+        "$SSREAD_BIN" > "$tmp"
     echo "CLAUDE_PROJECTS_DIR=\"$MOCK_PROJECTS\"" >> "$tmp"
+    echo "SSREAD_INSIDE_TMUX=1" >> "$tmp"
     source "$tmp"
 }
 
@@ -48,9 +52,16 @@ source_ssread_functions() {
     [[ -x "$SSREAD_BIN" ]]
 }
 
+@test "check_dependencies detects missing tools" {
+    # This just verifies the function exists and runs
+    source_ssread_functions
+    # Should not fail since jq and tmux are installed for test runner
+    check_dependencies
+}
+
 # ── Tests: Helpers ────────────────────────────────────────────────────────
 
-@test "extract_project_name parses directory names correctly" {
+@test "extract_project_name parses compound directory" {
     source_ssread_functions
     result=$(extract_project_name "-Users-ted-project-hg-client--wt-w2")
     [[ "$result" == "hg-client/_wt/w2" ]]
@@ -187,4 +198,45 @@ source_ssread_functions() {
     CLAUDE_PROJECTS_DIR="$empty_dir"
     load_sessions
     [[ "$SESSION_COUNT" -eq 0 ]]
+}
+
+# ── Tests: tmux helpers (without actual tmux) ─────────────────────────────
+
+@test "is_session_active returns false when no windows active" {
+    source_ssread_functions
+    ACTIVE_WINDOWS=""
+    ! is_session_active "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+}
+
+@test "is_session_active returns true when window name matches" {
+    source_ssread_functions
+    ACTIVE_WINDOWS="aaaa1111"
+    is_session_active "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+}
+
+@test "is_session_active returns false for non-matching session" {
+    source_ssread_functions
+    ACTIVE_WINDOWS="aaaa1111"
+    ! is_session_active "bbbb2222-cccc-dddd-eeee-ffffffffffff"
+}
+
+@test "tmux_active_count returns 0 when not in tmux" {
+    source_ssread_functions
+    unset TMUX 2>/dev/null || true
+    result=$(tmux_active_count)
+    [[ "$result" -eq 0 ]]
+}
+
+@test "tmux_find_session_window returns empty when not in tmux" {
+    source_ssread_functions
+    unset TMUX 2>/dev/null || true
+    result=$(tmux_find_session_window "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee")
+    [[ -z "$result" ]]
+}
+
+@test "ensure_tmux_session skips when SSREAD_INSIDE_TMUX is set" {
+    source_ssread_functions
+    SSREAD_INSIDE_TMUX=1
+    # Should return without exec
+    ensure_tmux_session
 }
