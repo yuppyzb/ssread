@@ -255,6 +255,54 @@ source_ssread_functions() {
     [[ "$SESSION_COUNT" -eq 2 ]]
 }
 
+# ── Tests: Grouping ───────────────────────────────────────────────────────
+
+@test "group_sessions creates groups from loaded sessions" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    group_sessions
+    [[ "$GROUP_COUNT" -eq 2 ]]
+}
+
+@test "group_sessions sets correct group counts" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    group_sessions
+    local total=0
+    for (( g=0; g<GROUP_COUNT; g++ )); do
+        total=$(( total + GROUP_COUNTS[g] ))
+    done
+    [[ "$total" -eq "$SESSION_COUNT" ]]
+}
+
+@test "group_sessions reorders sessions so same project is contiguous" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    group_sessions
+    for (( g=0; g<GROUP_COUNT; g++ )); do
+        local gstart="${GROUP_STARTS[$g]}"
+        local gcount="${GROUP_COUNTS[$g]}"
+        local expected_proj="${GROUP_NAMES[$g]}"
+        for (( s=0; s<gcount; s++ )); do
+            local idx=$(( gstart + s ))
+            [[ "${SESSION_PROJECTS[$idx]}" == "$expected_proj" ]]
+        done
+    done
+}
+
+@test "group_sessions with empty sessions produces no groups" {
+    source_ssread_functions
+    local empty_dir="$TEST_DIR/empty_projects"
+    mkdir -p "$empty_dir"
+    CLAUDE_PROJECTS_DIR="$empty_dir"
+    load_sessions
+    group_sessions
+    [[ "$GROUP_COUNT" -eq 0 ]]
+}
+
 # ── Tests: tmux helpers (without actual tmux) ─────────────────────────────
 
 @test "is_session_active returns false when no windows active" {
