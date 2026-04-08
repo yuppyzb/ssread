@@ -227,6 +227,18 @@ source_ssread_functions() {
     [[ "$result" -eq 0 ]]
 }
 
+@test "tmux_active_count returns a single integer (no double output)" {
+    source_ssread_functions
+    unset TMUX 2>/dev/null || true
+    result=$(tmux_active_count)
+    # Must be exactly one line, a valid integer usable in arithmetic
+    local line_count
+    line_count=$(echo "$result" | wc -l | tr -d ' ')
+    [[ "$line_count" -eq 1 ]]
+    # Must not error in arithmetic context
+    (( result >= 0 ))
+}
+
 @test "tmux_find_session_window returns empty when not in tmux" {
     source_ssread_functions
     unset TMUX 2>/dev/null || true
