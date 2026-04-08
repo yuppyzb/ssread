@@ -13,15 +13,20 @@ setup() {
     mkdir -p "$MOCK_PROJECTS/-Users-test-project-myapp"
     mkdir -p "$MOCK_PROJECTS/-Users-test-project-webapp/subagents"
 
+    # Session 1: 2 user turns + 1 assistant (with model/usage)
     cat > "$MOCK_PROJECTS/-Users-test-project-myapp/aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl" <<'JSONL'
 {"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"fix the login bug"},"uuid":"u1","timestamp":"2026-04-06T10:00:00.000Z","permissionMode":"default","userType":"external","entrypoint":"cli","cwd":"/Users/test/project/myapp","sessionId":"aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee","version":"2.1.90","gitBranch":"fix/login"}
-{"parentUuid":"u1","isSidechain":false,"type":"user","message":{"role":"user","content":"looks good, thanks"},"uuid":"u2","timestamp":"2026-04-06T10:30:00.000Z","permissionMode":"default","userType":"external","entrypoint":"cli","cwd":"/Users/test/project/myapp","sessionId":"aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee","version":"2.1.90","gitBranch":"fix/login"}
+{"parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"model":"claude-opus-4-6","role":"assistant","content":[{"type":"text","text":"Looking at the code..."}],"usage":{"input_tokens":100,"cache_creation_input_tokens":5000,"cache_read_input_tokens":10000,"output_tokens":250}},"uuid":"a1","timestamp":"2026-04-06T10:01:00.000Z","sessionId":"aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"}
+{"parentUuid":"a1","isSidechain":false,"type":"user","message":{"role":"user","content":"looks good, thanks"},"uuid":"u2","timestamp":"2026-04-06T10:30:00.000Z","permissionMode":"default","userType":"external","entrypoint":"cli","cwd":"/Users/test/project/myapp","sessionId":"aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee","version":"2.1.90","gitBranch":"fix/login"}
 JSONL
 
+    # Session 2: 1 user turn + 1 assistant (sonnet model)
     cat > "$MOCK_PROJECTS/-Users-test-project-webapp/bbbb2222-cccc-dddd-eeee-ffffffffffff.jsonl" <<'JSONL'
 {"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"add dark mode support"},"uuid":"u3","timestamp":"2026-04-05T14:00:00.000Z","permissionMode":"default","userType":"external","entrypoint":"cli","cwd":"/Users/test/project/webapp","sessionId":"bbbb2222-cccc-dddd-eeee-ffffffffffff","version":"2.1.88","gitBranch":"feature/dark-mode"}
+{"parentUuid":"u3","isSidechain":false,"type":"assistant","message":{"model":"claude-sonnet-4-6","role":"assistant","content":[{"type":"text","text":"I'll help with dark mode."},{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"theme.ts"}}],"usage":{"input_tokens":50,"cache_creation_input_tokens":2000,"cache_read_input_tokens":3000,"output_tokens":120}},"uuid":"a2","timestamp":"2026-04-05T14:01:00.000Z","sessionId":"bbbb2222-cccc-dddd-eeee-ffffffffffff"}
 JSONL
 
+    # Subagent (should be excluded)
     cat > "$MOCK_PROJECTS/-Users-test-project-webapp/subagents/agent-xxx.jsonl" <<'JSONL'
 {"type":"user","message":{"role":"user","content":"subagent task"},"uuid":"s1","timestamp":"2026-04-05T14:05:00.000Z","entrypoint":"cli","cwd":"/Users/test/project/webapp","sessionId":"sub-agent-id"}
 JSONL
@@ -35,7 +40,6 @@ teardown() {
 
 source_ssread_functions() {
     local tmp="$TEST_DIR/ssread_funcs.sh"
-    # Remove main call and ensure_tmux_session exec to avoid side effects
     sed -e '/^main "\$@"/d' \
         -e 's/exec tmux/echo "WOULD_EXEC tmux"/g' \
         "$SSREAD_BIN" > "$tmp"
@@ -53,9 +57,7 @@ source_ssread_functions() {
 }
 
 @test "check_dependencies detects missing tools" {
-    # This just verifies the function exists and runs
     source_ssread_functions
-    # Should not fail since jq and tmux are installed for test runner
     check_dependencies
 }
 
@@ -113,7 +115,21 @@ source_ssread_functions() {
     [[ "$result" -gt 0 ]]
 }
 
-# ── Tests: Session Loading ────────────────────────────────────────────────
+@test "format_model_short abbreviates model names" {
+    source_ssread_functions
+    [[ "$(format_model_short 'claude-opus-4-6')" == "opus" ]]
+    [[ "$(format_model_short 'claude-sonnet-4-6')" == "sonnet" ]]
+    [[ "$(format_model_short 'claude-haiku-4-5')" == "haiku" ]]
+}
+
+@test "format_tokens formats large numbers" {
+    source_ssread_functions
+    [[ "$(format_tokens 500)" == "500" ]]
+    [[ "$(format_tokens 15100)" == "15K" ]]
+    [[ "$(format_tokens 1200000)" == "1.2M" ]]
+}
+
+# ── Tests: Session Loading (compact) ──────────────────────────────────────
 
 @test "load_sessions finds correct number (excludes subagents)" {
     source_ssread_functions
@@ -134,14 +150,13 @@ source_ssread_functions() {
     $found1 && $found2
 }
 
-@test "load_sessions extracts first and last messages" {
+@test "load_sessions extracts first message" {
     source_ssread_functions
     CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
     load_sessions
     for (( i=0; i<SESSION_COUNT; i++ )); do
         if [[ "${SESSION_IDS[$i]}" == "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" ]]; then
             [[ "${SESSION_FIRST_MSG[$i]}" == "fix the login bug" ]]
-            [[ "${SESSION_LAST_MSG[$i]}" == "looks good, thanks" ]]
             return 0
         fi
     done
@@ -161,34 +176,31 @@ source_ssread_functions() {
     return 1
 }
 
-@test "load_sessions extracts message count" {
+@test "load_sessions extracts model from assistant message" {
     source_ssread_functions
     CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
     load_sessions
     for (( i=0; i<SESSION_COUNT; i++ )); do
         if [[ "${SESSION_IDS[$i]}" == "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" ]]; then
-            [[ "${SESSION_MSG_COUNTS[$i]}" -eq 2 ]]
+            [[ "${SESSION_MODELS[$i]}" == "claude-opus-4-6" ]]
             return 0
         fi
     done
     return 1
 }
 
-@test "search filter works" {
+@test "load_sessions extracts context tokens" {
     source_ssread_functions
     CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
     load_sessions
-    search_sessions "login"
-    [[ "$SESSION_COUNT" -eq 1 ]]
-    [[ "${SESSION_IDS[0]}" == "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" ]]
-}
-
-@test "search filter with no results" {
-    source_ssread_functions
-    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
-    load_sessions
-    search_sessions "nonexistent_query_xyz"
-    [[ "$SESSION_COUNT" -eq 0 ]]
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        if [[ "${SESSION_IDS[$i]}" == "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" ]]; then
+            # 100 + 5000 + 10000 = 15100
+            [[ "${SESSION_CTX[$i]}" -eq 15100 ]]
+            return 0
+        fi
+    done
+    return 1
 }
 
 @test "empty directory produces zero sessions" {
@@ -198,6 +210,62 @@ source_ssread_functions() {
     CLAUDE_PROJECTS_DIR="$empty_dir"
     load_sessions
     [[ "$SESSION_COUNT" -eq 0 ]]
+}
+
+# ── Tests: Lazy Detail Loading ────────────────────────────────────────────
+
+@test "load_session_detail loads last message" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        if [[ "${SESSION_IDS[$i]}" == "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" ]]; then
+            load_session_detail "$i"
+            [[ "$DETAIL_LAST_MSG" == "looks good, thanks" ]]
+            return 0
+        fi
+    done
+    return 1
+}
+
+@test "load_session_detail loads message count" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        if [[ "${SESSION_IDS[$i]}" == "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" ]]; then
+            load_session_detail "$i"
+            [[ "$DETAIL_MSG_COUNT" -eq 2 ]]
+            return 0
+        fi
+    done
+    return 1
+}
+
+@test "load_session_detail loads tool count" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        if [[ "${SESSION_IDS[$i]}" == "bbbb2222-cccc-dddd-eeee-ffffffffffff" ]]; then
+            load_session_detail "$i"
+            [[ "$DETAIL_TOOL_COUNT" -eq 1 ]]
+            [[ "$DETAIL_TOP_TOOL" == "Read" ]]
+            return 0
+        fi
+    done
+    return 1
+}
+
+@test "load_session_detail caches by session ID" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    load_session_detail 0
+    local first_sid="$DETAIL_SID"
+    # Second call should be cached (same result)
+    load_session_detail 0
+    [[ "$DETAIL_SID" == "$first_sid" ]]
 }
 
 # ── Tests: Search & BM25 ─────────────────────────────────────────────────
@@ -241,18 +309,9 @@ source_ssread_functions() {
     source_ssread_functions
     CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
     load_sessions
-    # "dark mode" matches session 2, "login bug" matches session 1
     search_sessions "dark mode"
     [[ "$SESSION_COUNT" -ge 1 ]]
     [[ "${SESSION_IDS[0]}" == "bbbb2222-cccc-dddd-eeee-ffffffffffff" ]]
-}
-
-@test "load_sessions without search loads all sessions" {
-    source_ssread_functions
-    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
-    SEARCH_ACTIVE=""
-    load_sessions
-    [[ "$SESSION_COUNT" -eq 2 ]]
 }
 
 # ── Tests: Grouping ───────────────────────────────────────────────────────
@@ -334,11 +393,9 @@ source_ssread_functions() {
     source_ssread_functions
     unset TMUX 2>/dev/null || true
     result=$(tmux_active_count)
-    # Must be exactly one line, a valid integer usable in arithmetic
     local line_count
     line_count=$(echo "$result" | wc -l | tr -d ' ')
     [[ "$line_count" -eq 1 ]]
-    # Must not error in arithmetic context
     (( result >= 0 ))
 }
 
@@ -352,6 +409,5 @@ source_ssread_functions() {
 @test "ensure_tmux_session skips when SSREAD_INSIDE_TMUX is set" {
     source_ssread_functions
     SSREAD_INSIDE_TMUX=1
-    # Should return without exec
     ensure_tmux_session
 }

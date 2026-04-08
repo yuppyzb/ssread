@@ -266,32 +266,41 @@ format_datetime() {
 }
 
 # ── Session Data ───────────────────────────────────────────────────────────
+# List-level fields (compact load: grep 2 lines per file)
 declare -a SESSION_FILES=()
 declare -a SESSION_IDS=()
-declare -a SESSION_TYPES=()
 declare -a SESSION_ELAPSED=()
 declare -a SESSION_DIRS=()
-declare -a SESSION_LAST_MSG=()
 declare -a SESSION_TIMESTAMPS=()
 declare -a SESSION_PROJECTS=()
 declare -a SESSION_BRANCHES=()
-declare -a SESSION_VERSIONS=()
-declare -a SESSION_FIRST_MSG=()
-declare -a SESSION_MSG_COUNTS=()
 declare -a SESSION_CWDS=()
 declare -a SESSION_EPOCH=()
+declare -a SESSION_FIRST_MSG=()   # first user message (session summary)
+declare -a SESSION_MODELS=()      # model name from last assistant message
+declare -a SESSION_CTX=()         # last context size in tokens
 
 SESSION_COUNT=0
 SELECTED=0
 SCROLL_OFFSET=0
 SEARCH_QUERY=""
 SEARCH_MODE=false
-SEARCH_ACTIVE=""  # The query that was actually executed (on Enter)
+SEARCH_ACTIVE=""
+
+# Detail-level fields (lazy loaded for one session at a time)
+DETAIL_SID=""         # which session is currently loaded
+DETAIL_LAST_MSG=""
+DETAIL_MSG_COUNT=""
+DETAIL_TOTAL_OUTPUT=""
+DETAIL_TOOL_COUNT=""
+DETAIL_TOP_TOOL=""
+DETAIL_VERSION=""
+DETAIL_ENTRYPOINT=""
 
 # Group data: sessions grouped by project
-declare -a GROUP_NAMES=()      # unique project names in display order
-declare -a GROUP_STARTS=()     # index into SESSION_* where each group begins
-declare -a GROUP_COUNTS=()     # number of sessions per group
+declare -a GROUP_NAMES=()
+declare -a GROUP_STARTS=()
+declare -a GROUP_COUNTS=()
 GROUP_COUNT=0
 
 # Cache of active tmux window names (refreshed periodically)
@@ -325,19 +334,18 @@ extract_project_name() {
 load_sessions() {
     SESSION_FILES=()
     SESSION_IDS=()
-    SESSION_TYPES=()
     SESSION_ELAPSED=()
     SESSION_DIRS=()
-    SESSION_LAST_MSG=()
     SESSION_TIMESTAMPS=()
     SESSION_PROJECTS=()
     SESSION_BRANCHES=()
-    SESSION_VERSIONS=()
-    SESSION_FIRST_MSG=()
-    SESSION_MSG_COUNTS=()
     SESSION_CWDS=()
     SESSION_EPOCH=()
+    SESSION_FIRST_MSG=()
+    SESSION_MODELS=()
+    SESSION_CTX=()
     SESSION_COUNT=0
+    DETAIL_SID=""  # invalidate cached detail
 
     local tmpfile
     tmpfile=$(mktemp)
@@ -353,47 +361,50 @@ load_sessions() {
         local file_name
         file_name=$(basename "$filepath" .jsonl)
 
-        local session_data
-        session_data=$(jq -r -s '
-            [.[] | select(.type == "user")] |
-            if length == 0 then
-                {sid: "", etype: "", ts: "", cwd: "", branch: "", ver: "", first_msg: "", last_msg: "", count: 0}
-            else
-                {
-                    sid: (.[0].sessionId // ""),
-                    etype: (.[0].entrypoint // "cli"),
-                    ts: (.[0].timestamp // ""),
-                    cwd: (.[0].cwd // ""),
-                    branch: (.[0].gitBranch // ""),
-                    ver: (.[0].version // ""),
-                    first_msg: ((.[0].message.content // "") | if type == "string" then . else (.[0] // "" | tostring) end | .[0:120]),
-                    last_msg: ((.[length-1].message.content // "") | if type == "string" then . else (.[0] // "" | tostring) end | .[0:120]),
-                    count: length
-                }
-            end
-        ' "$filepath" 2>/dev/null) || continue
+        # Compact load: first user line only (has sid, cwd, branch, ts, msg)
+        local first_user_line
+        first_user_line=$(grep -m1 '"type":"user"' "$filepath" 2>/dev/null) || continue
+        [[ -z "$first_user_line" ]] && continue
 
-        local sid etype ts cwd branch ver first_msg last_msg msg_count
-        sid=$(echo "$session_data" | jq -r '.sid')
-        etype=$(echo "$session_data" | jq -r '.etype')
-        ts=$(echo "$session_data" | jq -r '.ts')
-        cwd=$(echo "$session_data" | jq -r '.cwd')
-        branch=$(echo "$session_data" | jq -r '.branch')
-        ver=$(echo "$session_data" | jq -r '.ver')
-        first_msg=$(echo "$session_data" | jq -r '.first_msg')
-        last_msg=$(echo "$session_data" | jq -r '.last_msg')
-        msg_count=$(echo "$session_data" | jq -r '.count')
+        local user_data
+        user_data=$(printf '%s' "$first_user_line" | jq -r '{
+            sid: (.sessionId // ""),
+            ts: (.timestamp // ""),
+            cwd: (.cwd // ""),
+            branch: (.gitBranch // ""),
+            msg: ((.message.content // "") | if type == "string" then .[0:100] else "" end)
+        }' 2>/dev/null) || continue
+
+        local sid ts cwd branch first_msg
+        sid=$(printf '%s' "$user_data" | jq -r '.sid')
+        ts=$(printf '%s' "$user_data" | jq -r '.ts')
+        cwd=$(printf '%s' "$user_data" | jq -r '.cwd')
+        branch=$(printf '%s' "$user_data" | jq -r '.branch')
+        first_msg=$(printf '%s' "$user_data" | jq -r '.msg')
 
         [[ -z "$sid" || "$sid" == "null" ]] && sid="$file_name"
         [[ "$ts" == "null" ]] && ts=""
         [[ "$cwd" == "null" ]] && cwd=""
         [[ "$branch" == "null" ]] && branch=""
-        [[ "$ver" == "null" ]] && ver=""
         [[ "$first_msg" == "null" ]] && first_msg=""
-        [[ "$last_msg" == "null" ]] && last_msg=""
 
-        # Search filtering is handled after loading all sessions (search_sessions)
-        # Here we just load everything
+        # Compact load: last assistant line (has model, usage/context)
+        local model="" ctx=0
+        local last_asst_line
+        last_asst_line=$(grep '"type":"assistant"' "$filepath" 2>/dev/null | tail -1) || true
+        if [[ -n "$last_asst_line" ]]; then
+            local asst_data
+            asst_data=$(printf '%s' "$last_asst_line" | jq -r '{
+                model: (.message.model // ""),
+                ctx: ((.message.usage.input_tokens // 0) + (.message.usage.cache_creation_input_tokens // 0) + (.message.usage.cache_read_input_tokens // 0))
+            }' 2>/dev/null) || true
+            if [[ -n "$asst_data" ]]; then
+                model=$(printf '%s' "$asst_data" | jq -r '.model')
+                ctx=$(printf '%s' "$asst_data" | jq -r '.ctx')
+                [[ "$model" == "null" ]] && model=""
+                [[ "$ctx" == "null" ]] && ctx=0
+            fi
+        fi
 
         local epoch=0
         if [[ -n "$ts" ]]; then
@@ -405,17 +416,15 @@ load_sessions() {
 
         SESSION_FILES+=("$filepath")
         SESSION_IDS+=("$sid")
-        SESSION_TYPES+=("$etype")
         SESSION_TIMESTAMPS+=("$ts")
         SESSION_DIRS+=("$dir_name")
-        SESSION_LAST_MSG+=("$last_msg")
         SESSION_PROJECTS+=("$project_name")
         SESSION_BRANCHES+=("$branch")
-        SESSION_VERSIONS+=("$ver")
-        SESSION_FIRST_MSG+=("$first_msg")
-        SESSION_MSG_COUNTS+=("$msg_count")
         SESSION_CWDS+=("$cwd")
         SESSION_EPOCH+=("$epoch")
+        SESSION_FIRST_MSG+=("$first_msg")
+        SESSION_MODELS+=("$model")
+        SESSION_CTX+=("$ctx")
 
         if [[ -n "$ts" && "$epoch" -gt 0 ]]; then
             SESSION_ELAPSED+=("$(format_elapsed "$epoch")")
@@ -427,6 +436,73 @@ load_sessions() {
     done < "$tmpfile"
 
     rm -f "$tmpfile"
+}
+
+# ── Lazy Detail Loading ───────────────────────────────────────────────────
+# Full parse of a single session file. Called when selection changes.
+format_model_short() {
+    local m="$1"
+    case "$m" in
+        *opus*)   echo "opus" ;;
+        *sonnet*) echo "sonnet" ;;
+        *haiku*)  echo "haiku" ;;
+        *)        echo "${m:0:12}" ;;
+    esac
+}
+
+format_tokens() {
+    local t="$1"
+    if (( t >= 1000000 )); then
+        echo "$(( t / 1000000 )).$(( (t % 1000000) / 100000 ))M"
+    elif (( t >= 1000 )); then
+        echo "$(( t / 1000 ))K"
+    else
+        echo "$t"
+    fi
+}
+
+load_session_detail() {
+    local idx="$1"
+    local sid="${SESSION_IDS[$idx]}"
+
+    # Skip if already loaded for this session
+    if [[ "$DETAIL_SID" == "$sid" ]]; then
+        return
+    fi
+
+    DETAIL_SID="$sid"
+    DETAIL_LAST_MSG=""
+    DETAIL_MSG_COUNT=""
+    DETAIL_TOTAL_OUTPUT=""
+    DETAIL_TOOL_COUNT=""
+    DETAIL_TOP_TOOL=""
+    DETAIL_VERSION=""
+    DETAIL_ENTRYPOINT=""
+
+    local filepath="${SESSION_FILES[$idx]}"
+    [[ ! -f "$filepath" ]] && return
+
+    local detail
+    detail=$(jq -s '{
+        last_msg: ([.[] | select(.type == "user") | .message.content // ""] | last // "" | if type == "string" then .[0:120] else "" end),
+        msg_count: ([.[] | select(.type == "user")] | length),
+        total_output: ([.[] | select(.type == "assistant") | .message.usage.output_tokens // 0] | add // 0),
+        tool_count: ([.[] | select(.type == "assistant") | .message.content[]? | select(.type == "tool_use")] | length),
+        top_tool: ([.[] | select(.type == "assistant") | .message.content[]? | select(.type == "tool_use") | .name] | group_by(.) | sort_by(-length) | .[0][0] // "-"),
+        version: ([.[] | select(.type == "user") | .version // ""] | .[0] // ""),
+        entrypoint: ([.[] | select(.type == "user") | .entrypoint // ""] | .[0] // "")
+    }' "$filepath" 2>/dev/null) || return
+
+    DETAIL_LAST_MSG=$(printf '%s' "$detail" | jq -r '.last_msg')
+    DETAIL_MSG_COUNT=$(printf '%s' "$detail" | jq -r '.msg_count')
+    DETAIL_TOTAL_OUTPUT=$(printf '%s' "$detail" | jq -r '.total_output')
+    DETAIL_TOOL_COUNT=$(printf '%s' "$detail" | jq -r '.tool_count')
+    DETAIL_TOP_TOOL=$(printf '%s' "$detail" | jq -r '.top_tool')
+    DETAIL_VERSION=$(printf '%s' "$detail" | jq -r '.version')
+    DETAIL_ENTRYPOINT=$(printf '%s' "$detail" | jq -r '.entrypoint')
+
+    if [[ "$DETAIL_LAST_MSG" == "null" ]]; then DETAIL_LAST_MSG=""; fi
+    if [[ "$DETAIL_TOP_TOOL" == "null" ]]; then DETAIL_TOP_TOOL="-"; fi
 }
 
 # ── Group sessions by project ─────────────────────────────────────────────
@@ -478,41 +554,38 @@ group_sessions() {
     done
 
     # Reorder all SESSION_* arrays according to order[]
-    local -a nw_FILES=() nw_IDS=() nw_TYPES=() nw_ELAPSED=() nw_DIRS=()
-    local -a nw_LAST_MSG=() nw_TIMESTAMPS=() nw_PROJECTS=() nw_BRANCHES=()
-    local -a nw_VERSIONS=() nw_FIRST_MSG=() nw_MSG_COUNTS=() nw_CWDS=() nw_EPOCH=()
+    local -a nw_FILES=() nw_IDS=() nw_ELAPSED=() nw_DIRS=()
+    local -a nw_TIMESTAMPS=() nw_PROJECTS=() nw_BRANCHES=()
+    local -a nw_FIRST_MSG=() nw_CWDS=() nw_EPOCH=()
+    local -a nw_MODELS=() nw_CTX=()
 
     for idx in "${order[@]}"; do
         nw_FILES+=("${SESSION_FILES[$idx]}")
         nw_IDS+=("${SESSION_IDS[$idx]}")
-        nw_TYPES+=("${SESSION_TYPES[$idx]}")
         nw_ELAPSED+=("${SESSION_ELAPSED[$idx]}")
         nw_DIRS+=("${SESSION_DIRS[$idx]}")
-        nw_LAST_MSG+=("${SESSION_LAST_MSG[$idx]}")
         nw_TIMESTAMPS+=("${SESSION_TIMESTAMPS[$idx]}")
         nw_PROJECTS+=("${SESSION_PROJECTS[$idx]}")
         nw_BRANCHES+=("${SESSION_BRANCHES[$idx]}")
-        nw_VERSIONS+=("${SESSION_VERSIONS[$idx]}")
         nw_FIRST_MSG+=("${SESSION_FIRST_MSG[$idx]}")
-        nw_MSG_COUNTS+=("${SESSION_MSG_COUNTS[$idx]}")
         nw_CWDS+=("${SESSION_CWDS[$idx]}")
         nw_EPOCH+=("${SESSION_EPOCH[$idx]}")
+        nw_MODELS+=("${SESSION_MODELS[$idx]}")
+        nw_CTX+=("${SESSION_CTX[$idx]}")
     done
 
     SESSION_FILES=("${nw_FILES[@]}")
     SESSION_IDS=("${nw_IDS[@]}")
-    SESSION_TYPES=("${nw_TYPES[@]}")
     SESSION_ELAPSED=("${nw_ELAPSED[@]}")
     SESSION_DIRS=("${nw_DIRS[@]}")
-    SESSION_LAST_MSG=("${nw_LAST_MSG[@]}")
     SESSION_TIMESTAMPS=("${nw_TIMESTAMPS[@]}")
     SESSION_PROJECTS=("${nw_PROJECTS[@]}")
     SESSION_BRANCHES=("${nw_BRANCHES[@]}")
-    SESSION_VERSIONS=("${nw_VERSIONS[@]}")
     SESSION_FIRST_MSG=("${nw_FIRST_MSG[@]}")
-    SESSION_MSG_COUNTS=("${nw_MSG_COUNTS[@]}")
     SESSION_CWDS=("${nw_CWDS[@]}")
     SESSION_EPOCH=("${nw_EPOCH[@]}")
+    SESSION_MODELS=("${nw_MODELS[@]}")
+    SESSION_CTX=("${nw_CTX[@]}")
 }
 
 # ── Search with BM25 scoring ──────────────────────────────────────────────
@@ -638,21 +711,18 @@ search_sessions() {
     # Sort by score descending — rebuild arrays in score order
     local count=${#scored_indices[@]}
     if (( count == 0 )); then
-        # No matches — clear everything
         SESSION_FILES=()
         SESSION_IDS=()
-        SESSION_TYPES=()
         SESSION_ELAPSED=()
         SESSION_DIRS=()
-        SESSION_LAST_MSG=()
         SESSION_TIMESTAMPS=()
         SESSION_PROJECTS=()
         SESSION_BRANCHES=()
-        SESSION_VERSIONS=()
         SESSION_FIRST_MSG=()
-        SESSION_MSG_COUNTS=()
         SESSION_CWDS=()
         SESSION_EPOCH=()
+        SESSION_MODELS=()
+        SESSION_CTX=()
         SESSION_COUNT=0
         return
     fi
@@ -672,42 +742,39 @@ search_sessions() {
     done
 
     # Rebuild arrays in sorted order
-    local -a new_FILES=() new_IDS=() new_TYPES=() new_ELAPSED=() new_DIRS=()
-    local -a new_LAST_MSG=() new_TIMESTAMPS=() new_PROJECTS=() new_BRANCHES=()
-    local -a new_VERSIONS=() new_FIRST_MSG=() new_MSG_COUNTS=() new_CWDS=() new_EPOCH=()
+    local -a new_FILES=() new_IDS=() new_ELAPSED=() new_DIRS=()
+    local -a new_TIMESTAMPS=() new_PROJECTS=() new_BRANCHES=()
+    local -a new_FIRST_MSG=() new_CWDS=() new_EPOCH=()
+    local -a new_MODELS=() new_CTX=()
 
     for (( x=0; x<count; x++ )); do
         local idx="${scored_indices[$x]}"
         new_FILES+=("${SESSION_FILES[$idx]}")
         new_IDS+=("${SESSION_IDS[$idx]}")
-        new_TYPES+=("${SESSION_TYPES[$idx]}")
         new_ELAPSED+=("${SESSION_ELAPSED[$idx]}")
         new_DIRS+=("${SESSION_DIRS[$idx]}")
-        new_LAST_MSG+=("${SESSION_LAST_MSG[$idx]}")
         new_TIMESTAMPS+=("${SESSION_TIMESTAMPS[$idx]}")
         new_PROJECTS+=("${SESSION_PROJECTS[$idx]}")
         new_BRANCHES+=("${SESSION_BRANCHES[$idx]}")
-        new_VERSIONS+=("${SESSION_VERSIONS[$idx]}")
         new_FIRST_MSG+=("${SESSION_FIRST_MSG[$idx]}")
-        new_MSG_COUNTS+=("${SESSION_MSG_COUNTS[$idx]}")
         new_CWDS+=("${SESSION_CWDS[$idx]}")
         new_EPOCH+=("${SESSION_EPOCH[$idx]}")
+        new_MODELS+=("${SESSION_MODELS[$idx]}")
+        new_CTX+=("${SESSION_CTX[$idx]}")
     done
 
     SESSION_FILES=("${new_FILES[@]}")
     SESSION_IDS=("${new_IDS[@]}")
-    SESSION_TYPES=("${new_TYPES[@]}")
     SESSION_ELAPSED=("${new_ELAPSED[@]}")
     SESSION_DIRS=("${new_DIRS[@]}")
-    SESSION_LAST_MSG=("${new_LAST_MSG[@]}")
     SESSION_TIMESTAMPS=("${new_TIMESTAMPS[@]}")
     SESSION_PROJECTS=("${new_PROJECTS[@]}")
     SESSION_BRANCHES=("${new_BRANCHES[@]}")
-    SESSION_VERSIONS=("${new_VERSIONS[@]}")
     SESSION_FIRST_MSG=("${new_FIRST_MSG[@]}")
-    SESSION_MSG_COUNTS=("${new_MSG_COUNTS[@]}")
     SESSION_CWDS=("${new_CWDS[@]}")
     SESSION_EPOCH=("${new_EPOCH[@]}")
+    SESSION_MODELS=("${new_MODELS[@]}")
+    SESSION_CTX=("${new_CTX[@]}")
     SESSION_COUNT=$count
 }
 
@@ -869,31 +936,38 @@ draw_session_list() {
         else
             local i="${display_indices[$d]}"
             local sid_short="${SESSION_IDS[$i]:0:8}"
-            local etype="${SESSION_TYPES[$i]}"
             local elapsed="${SESSION_ELAPSED[$i]}"
-            local last_msg="${SESSION_LAST_MSG[$i]}"
+            local branch="${SESSION_BRANCHES[$i]}"
+            local model_short
+            model_short=$(format_model_short "${SESSION_MODELS[$i]}")
+            local ctx_short
+            ctx_short=$(format_tokens "${SESSION_CTX[$i]}")
+            local first_msg="${SESSION_FIRST_MSG[$i]}"
 
             local run_mark=""
             if is_session_active "${SESSION_IDS[$i]}"; then
                 run_mark=" ▸"
             fi
 
+            # Line 1: sid, elapsed, model, ctx
+            local meta="${model_short} ${ctx_short}"
             local line1
             if (( i == SELECTED )); then
-                line1=$(printf " ▶ %-8s  %-4s  %-7s%s" "$sid_short" "$etype" "$elapsed" "$run_mark")
+                line1=$(printf " ▶ %-8s %-7s %-6s%s" "$sid_short" "$elapsed" "$meta" "$run_mark")
                 print_at_styled "$row" 2 "$LEFT_WIDTH" "${BOLD}${REV}${FG_WHITE}" "$line1"
             else
                 if [[ -n "$run_mark" ]]; then
-                    line1=$(printf "   %-8s  %-4s  %-7s%s" "$sid_short" "$etype" "$elapsed" "$run_mark")
+                    line1=$(printf "   %-8s %-7s %-6s%s" "$sid_short" "$elapsed" "$meta" "$run_mark")
                     print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_GREEN}" "$line1"
                 else
-                    line1=$(printf "   %-8s  %-4s  %s" "$sid_short" "$etype" "$elapsed")
+                    line1=$(printf "   %-8s %-7s %s" "$sid_short" "$elapsed" "$meta")
                     print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_WHITE}" "$line1"
                 fi
             fi
             row=$(( row + 1 ))
 
-            local line2="     ${last_msg}"
+            # Line 2: first message (session purpose)
+            local line2="     ${first_msg}"
             if (( i == SELECTED )); then
                 print_at_styled "$row" 2 "$LEFT_WIDTH" "${REV}${FG_GRAY}" "$line2"
             else
@@ -926,19 +1000,20 @@ draw_detail_panel() {
 
     local i=$SELECTED
     local sid="${SESSION_IDS[$i]}"
-    local etype="${SESSION_TYPES[$i]}"
     local project="${SESSION_PROJECTS[$i]}"
     local branch="${SESSION_BRANCHES[$i]}"
     local cwd="${SESSION_CWDS[$i]}"
     local ts="${SESSION_TIMESTAMPS[$i]}"
-    local ver="${SESSION_VERSIONS[$i]}"
     local first_msg="${SESSION_FIRST_MSG[$i]}"
-    local last_msg="${SESSION_LAST_MSG[$i]}"
-    local msg_count="${SESSION_MSG_COUNTS[$i]}"
+    local model="${SESSION_MODELS[$i]}"
+    local ctx="${SESSION_CTX[$i]}"
 
+    # Lazy load detail for this session
+    load_session_detail "$i"
+
+    # ── Header ──
     print_at_styled "$row" "$col" "$width" "${BOLD}${FG_YELLOW}" "  Session"
     row=$(( row + 1 ))
-
     if is_session_active "$sid"; then
         print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_GREEN}▸ running"
     else
@@ -946,40 +1021,57 @@ draw_detail_panel() {
     fi
     row=$(( row + 2 ))
 
+    # ── Metadata ──
     print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Project   ${RESET}${FG_WHITE}$project"
     row=$(( row + 1 ))
-
     if [[ -n "$branch" ]]; then
         print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Branch    ${RESET}${FG_GREEN}$branch"
         row=$(( row + 1 ))
     fi
-
     if [[ -n "$cwd" ]]; then
         print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  CWD       ${RESET}${FG_WHITE}$cwd"
         row=$(( row + 1 ))
     fi
-
-    print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Type      ${RESET}${FG_WHITE}$etype"
-    row=$(( row + 1 ))
-    if [[ -n "$ver" ]]; then
-        print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Version   ${RESET}${FG_WHITE}$ver"
-        row=$(( row + 1 ))
-    fi
-
     if [[ -n "$ts" ]]; then
         local formatted
         formatted=$(format_datetime "$ts")
         print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Started   ${RESET}${FG_WHITE}$formatted"
         row=$(( row + 1 ))
     fi
+    row=$(( row + 1 ))
 
-    print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Messages  ${RESET}${FG_WHITE}$msg_count user messages"
-    row=$(( row + 2 ))
+    # ── Model & Context ──
+    local model_display
+    model_display=$(format_model_short "$model")
+    local ctx_display
+    ctx_display=$(format_tokens "$ctx")
+    print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Model     ${RESET}${FG_WHITE}$model_display"
+    row=$(( row + 1 ))
+    print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Context   ${RESET}${FG_WHITE}${ctx_display} tokens"
+    row=$(( row + 1 ))
 
+    # ── Detail (lazy loaded) ──
+    if [[ -n "$DETAIL_MSG_COUNT" ]]; then
+        local output_display
+        output_display=$(format_tokens "$DETAIL_TOTAL_OUTPUT")
+        print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Messages  ${RESET}${FG_WHITE}$DETAIL_MSG_COUNT turns"
+        row=$(( row + 1 ))
+        print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Output    ${RESET}${FG_WHITE}${output_display} tokens"
+        row=$(( row + 1 ))
+        print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Tools     ${RESET}${FG_WHITE}$DETAIL_TOOL_COUNT calls ($DETAIL_TOP_TOOL)"
+        row=$(( row + 1 ))
+        if [[ -n "$DETAIL_VERSION" && "$DETAIL_VERSION" != "null" ]]; then
+            print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Version   ${RESET}${FG_WHITE}$DETAIL_VERSION"
+            row=$(( row + 1 ))
+        fi
+    fi
+    row=$(( row + 1 ))
+
+    # ── First Message ──
+    local line_width=$(( width - 4 ))
     print_at_styled "$row" "$col" "$width" "${BOLD}${FG_MAGENTA}" "  ── First Message ──"
     row=$(( row + 1 ))
     local remaining="$first_msg"
-    local line_width=$(( width - 4 ))
     while [[ -n "$remaining" ]] && (( row < TERM_ROWS - 8 )); do
         print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  ${remaining:0:$line_width}"
         remaining="${remaining:$line_width}"
@@ -987,10 +1079,11 @@ draw_detail_panel() {
     done
     row=$(( row + 1 ))
 
-    if [[ "$first_msg" != "$last_msg" ]] && [[ -n "$last_msg" ]]; then
+    # ── Last Message ──
+    if [[ -n "$DETAIL_LAST_MSG" && "$DETAIL_LAST_MSG" != "$first_msg" ]]; then
         print_at_styled "$row" "$col" "$width" "${BOLD}${FG_MAGENTA}" "  ── Last Message ──"
         row=$(( row + 1 ))
-        remaining="$last_msg"
+        remaining="$DETAIL_LAST_MSG"
         while [[ -n "$remaining" ]] && (( row < TERM_ROWS - 3 )); do
             print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  ${remaining:0:$line_width}"
             remaining="${remaining:$line_width}"
