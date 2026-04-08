@@ -284,6 +284,7 @@ SELECTED=0
 SCROLL_OFFSET=0
 SEARCH_QUERY=""
 SEARCH_MODE=false
+SEARCH_ACTIVE=""  # The query that was actually executed (on Enter)
 
 # Cache of active tmux window names (refreshed periodically)
 ACTIVE_WINDOWS=""
@@ -383,15 +384,8 @@ load_sessions() {
         [[ "$first_msg" == "null" ]] && first_msg=""
         [[ "$last_msg" == "null" ]] && last_msg=""
 
-        if [[ -n "$SEARCH_QUERY" ]]; then
-            local search_lower
-            search_lower=$(printf '%s' "$SEARCH_QUERY" | tr '[:upper:]' '[:lower:]')
-            local haystack
-            haystack=$(printf '%s' "$sid $first_msg $last_msg $cwd $branch $dir_name" | tr '[:upper:]' '[:lower:]')
-            if [[ "$haystack" != *"$search_lower"* ]]; then
-                continue
-            fi
-        fi
+        # Search filtering is handled after loading all sessions (search_sessions)
+        # Here we just load everything
 
         local epoch=0
         if [[ -n "$ts" ]]; then
@@ -425,6 +419,202 @@ load_sessions() {
     done < "$tmpfile"
 
     rm -f "$tmpfile"
+}
+
+# ── Search with BM25 scoring ──────────────────────────────────────────────
+# Searches all user messages in each session's .jsonl file.
+# Scores results using simplified BM25: TF * IDF component.
+# Results are sorted by score descending; non-matching sessions are hidden.
+
+search_sessions() {
+    local query="$1"
+    if [[ -z "$query" ]]; then
+        return
+    fi
+
+    local query_lower
+    query_lower=$(printf '%s' "$query" | tr '[:upper:]' '[:lower:]')
+
+    # Split query into terms
+    local -a terms=()
+    for word in $query_lower; do
+        [[ -n "$word" ]] && terms+=("$word")
+    done
+    if [[ ${#terms[@]} -eq 0 ]]; then
+        return
+    fi
+
+    local total_docs=$SESSION_COUNT
+    if (( total_docs == 0 )); then
+        return
+    fi
+
+    # For each session, compute BM25 score by searching full .jsonl content
+    local -a scored_indices=()
+    local -a scored_values=()
+    local k1=1200  # BM25 k1 * 1000 (integer math, 1.2 → 1200)
+    local b=750    # BM25 b * 1000 (0.75 → 750)
+
+    # Compute average document length (word count of all user messages)
+    local total_words=0
+    local -a doc_lengths=()
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        local wc
+        wc=$(jq -s -r '[.[] | select(.type == "user") | .message.content // ""] | join(" ") | split(" ") | length' \
+            "${SESSION_FILES[$i]}" 2>/dev/null) || wc=0
+        doc_lengths+=("$wc")
+        total_words=$(( total_words + wc ))
+    done
+    local avg_dl=$(( total_words / (total_docs > 0 ? total_docs : 1) ))
+    (( avg_dl == 0 )) && avg_dl=1
+
+    # Count document frequency for each term (how many sessions contain it)
+    local -a df=()
+    for (( t=0; t<${#terms[@]}; t++ )); do
+        local term_df=0
+        for (( i=0; i<SESSION_COUNT; i++ )); do
+            if jq -s -e --arg q "${terms[$t]}" \
+                '[.[] | select(.type == "user") | .message.content // ""] | join(" ") | ascii_downcase | test($q)' \
+                "${SESSION_FILES[$i]}" >/dev/null 2>&1; then
+                term_df=$(( term_df + 1 ))
+            fi
+        done
+        df+=("$term_df")
+    done
+
+    # Score each session
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        local score=0
+        local dl="${doc_lengths[$i]}"
+        local matched=false
+
+        # Get all user message text for this session (lowercase)
+        local all_text
+        all_text=$(jq -s -r '[.[] | select(.type == "user") | .message.content // ""] | join(" ") | ascii_downcase' \
+            "${SESSION_FILES[$i]}" 2>/dev/null) || all_text=""
+
+        for (( t=0; t<${#terms[@]}; t++ )); do
+            local term="${terms[$t]}"
+            local tdf="${df[$t]}"
+
+            # Term frequency: count occurrences
+            local tf=0
+            if [[ -n "$all_text" ]]; then
+                # Count non-overlapping occurrences
+                local stripped="${all_text//$term/}"
+                local term_len=${#term}
+                if (( term_len > 0 )); then
+                    tf=$(( (${#all_text} - ${#stripped}) / term_len ))
+                fi
+            fi
+
+            if (( tf > 0 )); then
+                matched=true
+
+                # IDF = ln((N - df + 0.5) / (df + 0.5)) * 1000
+                # Simplified: higher when term is rarer
+                local idf
+                if (( tdf == 0 )); then
+                    idf=1000
+                else
+                    # (N - df) / df * 1000 as approximation
+                    idf=$(( (total_docs - tdf) * 1000 / tdf ))
+                fi
+                (( idf < 100 )) && idf=100
+
+                # BM25 TF component: tf * (k1 + 1000) / (tf * 1000 + k1 * (1000 - b + b * dl * 1000 / avg_dl) / 1000)
+                # Simplified integer approximation:
+                local norm=$(( 1000 - b + b * dl / avg_dl ))
+                local denom=$(( tf * 1000 + k1 * norm / 1000 ))
+                local tf_score=0
+                if (( denom > 0 )); then
+                    tf_score=$(( tf * (k1 + 1000) * 1000 / denom ))
+                fi
+
+                score=$(( score + tf_score * idf / 1000 ))
+            fi
+        done
+
+        if $matched; then
+            scored_indices+=("$i")
+            scored_values+=("$score")
+        fi
+    done
+
+    # Sort by score descending — rebuild arrays in score order
+    local count=${#scored_indices[@]}
+    if (( count == 0 )); then
+        # No matches — clear everything
+        SESSION_FILES=()
+        SESSION_IDS=()
+        SESSION_TYPES=()
+        SESSION_ELAPSED=()
+        SESSION_DIRS=()
+        SESSION_LAST_MSG=()
+        SESSION_TIMESTAMPS=()
+        SESSION_PROJECTS=()
+        SESSION_BRANCHES=()
+        SESSION_VERSIONS=()
+        SESSION_FIRST_MSG=()
+        SESSION_MSG_COUNTS=()
+        SESSION_CWDS=()
+        SESSION_EPOCH=()
+        SESSION_COUNT=0
+        return
+    fi
+
+    # Bubble sort indices by score (small N, fine for ~100 sessions)
+    for (( a=0; a<count-1; a++ )); do
+        for (( c=0; c<count-a-1; c++ )); do
+            if (( scored_values[c] < scored_values[c+1] )); then
+                local tmp_i="${scored_indices[$c]}"
+                scored_indices[$c]="${scored_indices[$((c+1))]}"
+                scored_indices[$((c+1))]="$tmp_i"
+                local tmp_s="${scored_values[$c]}"
+                scored_values[$c]="${scored_values[$((c+1))]}"
+                scored_values[$((c+1))]="$tmp_s"
+            fi
+        done
+    done
+
+    # Rebuild arrays in sorted order
+    local -a new_FILES=() new_IDS=() new_TYPES=() new_ELAPSED=() new_DIRS=()
+    local -a new_LAST_MSG=() new_TIMESTAMPS=() new_PROJECTS=() new_BRANCHES=()
+    local -a new_VERSIONS=() new_FIRST_MSG=() new_MSG_COUNTS=() new_CWDS=() new_EPOCH=()
+
+    for (( x=0; x<count; x++ )); do
+        local idx="${scored_indices[$x]}"
+        new_FILES+=("${SESSION_FILES[$idx]}")
+        new_IDS+=("${SESSION_IDS[$idx]}")
+        new_TYPES+=("${SESSION_TYPES[$idx]}")
+        new_ELAPSED+=("${SESSION_ELAPSED[$idx]}")
+        new_DIRS+=("${SESSION_DIRS[$idx]}")
+        new_LAST_MSG+=("${SESSION_LAST_MSG[$idx]}")
+        new_TIMESTAMPS+=("${SESSION_TIMESTAMPS[$idx]}")
+        new_PROJECTS+=("${SESSION_PROJECTS[$idx]}")
+        new_BRANCHES+=("${SESSION_BRANCHES[$idx]}")
+        new_VERSIONS+=("${SESSION_VERSIONS[$idx]}")
+        new_FIRST_MSG+=("${SESSION_FIRST_MSG[$idx]}")
+        new_MSG_COUNTS+=("${SESSION_MSG_COUNTS[$idx]}")
+        new_CWDS+=("${SESSION_CWDS[$idx]}")
+        new_EPOCH+=("${SESSION_EPOCH[$idx]}")
+    done
+
+    SESSION_FILES=("${new_FILES[@]}")
+    SESSION_IDS=("${new_IDS[@]}")
+    SESSION_TYPES=("${new_TYPES[@]}")
+    SESSION_ELAPSED=("${new_ELAPSED[@]}")
+    SESSION_DIRS=("${new_DIRS[@]}")
+    SESSION_LAST_MSG=("${new_LAST_MSG[@]}")
+    SESSION_TIMESTAMPS=("${new_TIMESTAMPS[@]}")
+    SESSION_PROJECTS=("${new_PROJECTS[@]}")
+    SESSION_BRANCHES=("${new_BRANCHES[@]}")
+    SESSION_VERSIONS=("${new_VERSIONS[@]}")
+    SESSION_FIRST_MSG=("${new_FIRST_MSG[@]}")
+    SESSION_MSG_COUNTS=("${new_MSG_COUNTS[@]}")
+    SESSION_CWDS=("${new_CWDS[@]}")
+    SESSION_EPOCH=("${new_EPOCH[@]}")
+    SESSION_COUNT=$count
 }
 
 # ── Session Launch (fallback for non-tmux) ─────────────────────────────────
@@ -480,8 +670,8 @@ draw_left_header() {
     local active_count
     active_count=$(tmux_active_count)
     local title
-    if [[ -n "$SEARCH_QUERY" ]]; then
-        title=" Sessions [$SEARCH_QUERY] ($SESSION_COUNT)"
+    if [[ -n "$SEARCH_ACTIVE" ]]; then
+        title=" Search: \"$SEARCH_ACTIVE\" ($SESSION_COUNT results)"
     elif (( active_count > 0 )); then
         title=" Sessions ($SESSION_COUNT)  ${FG_GREEN}▸ $active_count running"
     else
@@ -647,7 +837,10 @@ draw_status_bar() {
     local bar_row=$TERM_ROWS
     move_to "$bar_row" 1
     if $SEARCH_MODE; then
-        printf "${REV}${FG_WHITE} /%-$(( TERM_COLS - 2 ))s${RESET}" "$SEARCH_QUERY"
+        printf "${REV}${FG_WHITE} /${SEARCH_QUERY}█%-$(( TERM_COLS - ${#SEARCH_QUERY} - 3 ))s${RESET}" " Enter: Search  Esc: Cancel"
+    elif [[ -n "$SEARCH_ACTIVE" ]]; then
+        local bar_text=" ↑↓ Navigate  Enter: Open  Esc: Clear search  /: New search  r: Refresh"
+        printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     else
         local bar_text=" ↑↓ Navigate  Enter: Open  Tab: Next window  q: Quit  Q: Quit all  /: Search  r: Refresh"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
@@ -705,21 +898,35 @@ read_key() {
 
 handle_search_input() {
     case "$_KEY" in
-        ESC|ENTER)
+        ENTER)
             SEARCH_MODE=false
+            if [[ -n "$SEARCH_QUERY" ]]; then
+                SEARCH_ACTIVE="$SEARCH_QUERY"
+                SELECTED=0
+                SCROLL_OFFSET=0
+                draw_loading
+                load_sessions
+                search_sessions "$SEARCH_ACTIVE"
+            fi
+            ;;
+        ESC)
+            SEARCH_MODE=false
+            if [[ -n "$SEARCH_ACTIVE" ]]; then
+                # Clear search and reload all sessions
+                SEARCH_QUERY=""
+                SEARCH_ACTIVE=""
+                SELECTED=0
+                SCROLL_OFFSET=0
+                load_sessions
+            fi
+            SEARCH_QUERY=""
             ;;
         $'\x7f'|$'\b')
             SEARCH_QUERY="${SEARCH_QUERY%?}"
-            SELECTED=0
-            SCROLL_OFFSET=0
-            load_sessions
             ;;
         *)
             if [[ ${#_KEY} -eq 1 ]] && [[ "$_KEY" =~ [[:print:]] ]]; then
                 SEARCH_QUERY="${SEARCH_QUERY}${_KEY}"
-                SELECTED=0
-                SCROLL_OFFSET=0
-                load_sessions
             fi
             ;;
     esac
@@ -781,8 +988,9 @@ handle_input() {
             SEARCH_QUERY=""
             ;;
         ESC)
-            if [[ -n "$SEARCH_QUERY" ]]; then
+            if [[ -n "$SEARCH_ACTIVE" ]]; then
                 SEARCH_QUERY=""
+                SEARCH_ACTIVE=""
                 SELECTED=0
                 SCROLL_OFFSET=0
                 load_sessions

@@ -177,8 +177,8 @@ source_ssread_functions() {
 @test "search filter works" {
     source_ssread_functions
     CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
-    SEARCH_QUERY="login"
     load_sessions
+    search_sessions "login"
     [[ "$SESSION_COUNT" -eq 1 ]]
     [[ "${SESSION_IDS[0]}" == "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" ]]
 }
@@ -186,8 +186,8 @@ source_ssread_functions() {
 @test "search filter with no results" {
     source_ssread_functions
     CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
-    SEARCH_QUERY="nonexistent_query_xyz"
     load_sessions
+    search_sessions "nonexistent_query_xyz"
     [[ "$SESSION_COUNT" -eq 0 ]]
 }
 
@@ -198,6 +198,61 @@ source_ssread_functions() {
     CLAUDE_PROJECTS_DIR="$empty_dir"
     load_sessions
     [[ "$SESSION_COUNT" -eq 0 ]]
+}
+
+# ── Tests: Search & BM25 ─────────────────────────────────────────────────
+
+@test "search_sessions filters to matching sessions" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    [[ "$SESSION_COUNT" -eq 2 ]]
+    search_sessions "login"
+    [[ "$SESSION_COUNT" -eq 1 ]]
+    [[ "${SESSION_IDS[0]}" == "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" ]]
+}
+
+@test "search_sessions returns zero for no match" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    search_sessions "xyznonexistent"
+    [[ "$SESSION_COUNT" -eq 0 ]]
+}
+
+@test "search_sessions is case-insensitive" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    search_sessions "LOGIN"
+    [[ "$SESSION_COUNT" -eq 1 ]]
+}
+
+@test "search_sessions with empty query returns all" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    local before=$SESSION_COUNT
+    search_sessions ""
+    [[ "$SESSION_COUNT" -eq "$before" ]]
+}
+
+@test "search_sessions ranks multi-term matches higher" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    # "dark mode" matches session 2, "login bug" matches session 1
+    search_sessions "dark mode"
+    [[ "$SESSION_COUNT" -ge 1 ]]
+    [[ "${SESSION_IDS[0]}" == "bbbb2222-cccc-dddd-eeee-ffffffffffff" ]]
+}
+
+@test "load_sessions without search loads all sessions" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    SEARCH_ACTIVE=""
+    load_sessions
+    [[ "$SESSION_COUNT" -eq 2 ]]
 }
 
 # ── Tests: tmux helpers (without actual tmux) ─────────────────────────────
