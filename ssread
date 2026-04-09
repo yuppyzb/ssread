@@ -100,49 +100,6 @@ tmux_find_session_window() {
         done
 }
 
-# Get list of all active session IDs (running in tmux windows)
-tmux_active_session_ids() {
-    if [[ -z "${TMUX:-}" ]]; then
-        return
-    fi
-
-    tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name}' 2>/dev/null \
-        | grep -v '^list$' || true
-}
-
-# Launch a claude session in a new tmux window
-tmux_launch_session() {
-    local sid="$1"
-    local cwd="$2"
-    local sid_short="${sid:0:8}"
-
-    if [[ -z "${TMUX:-}" ]]; then
-        # Fallback: not in tmux, launch directly (old behavior)
-        launch_session_direct "$sid" "$cwd"
-        return
-    fi
-
-    local cd_cmd=""
-    if [[ -n "$cwd" && -d "$cwd" ]]; then
-        cd_cmd="cd $(printf '%q' "$cwd") && "
-    fi
-
-    tmux new-window -t "$TMUX_SESSION_NAME" -n "$sid_short" \
-        "${cd_cmd}claude --resume '$sid'; echo ''; echo 'Session ended. Press any key to close.'; read -rsn1"
-}
-
-# Switch to an existing tmux window running a session
-tmux_switch_to_window() {
-    local window_idx="$1"
-    tmux select-window -t "$TMUX_SESSION_NAME:$window_idx" 2>/dev/null || true
-}
-
-# Switch back to ssread list window (window 0 / "list")
-tmux_switch_to_list() {
-    tmux select-window -t "$TMUX_SESSION_NAME:list" 2>/dev/null \
-        || tmux select-window -t "$TMUX_SESSION_NAME:0" 2>/dev/null || true
-}
-
 # Kill all claude windows (not the list window)
 tmux_kill_all_sessions() {
     if [[ -z "${TMUX:-}" ]]; then
