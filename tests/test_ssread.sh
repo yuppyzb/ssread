@@ -420,19 +420,19 @@ source_ssread_functions() {
 
 @test "is_session_active returns false when no windows active" {
     source_ssread_functions
-    ACTIVE_WINDOWS=""
+    ACTIVE_WINDOWS_STR="|"
     ! is_session_active "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 }
 
 @test "is_session_active returns true when window name matches" {
     source_ssread_functions
-    ACTIVE_WINDOWS="aaaa1111"
+    ACTIVE_WINDOWS_STR="|aaaa1111|"
     is_session_active "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 }
 
 @test "is_session_active returns false for non-matching session" {
     source_ssread_functions
-    ACTIVE_WINDOWS="aaaa1111"
+    ACTIVE_WINDOWS_STR="|aaaa1111|"
     ! is_session_active "bbbb2222-cccc-dddd-eeee-ffffffffffff"
 }
 

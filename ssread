@@ -312,7 +312,9 @@ declare -a GROUP_COUNTS=()
 GROUP_COUNT=0
 
 # Cache of active tmux window names (refreshed periodically)
-ACTIVE_WINDOWS=""
+# Stored as "|name1|name2|name3|" for fast substring match without subprocess
+ACTIVE_WINDOWS_STR="|"
+ACTIVE_WINDOWS_COUNT=0
 ACTIVE_WINDOWS_LAST_REFRESH=0
 
 refresh_active_windows() {
@@ -322,14 +324,22 @@ refresh_active_windows() {
     if (( now - ACTIVE_WINDOWS_LAST_REFRESH < 2 )); then
         return
     fi
-    ACTIVE_WINDOWS=$(tmux_active_session_ids)
+    ACTIVE_WINDOWS_STR="|"
+    ACTIVE_WINDOWS_COUNT=0
+    if [[ -n "${TMUX:-}" ]]; then
+        local name
+        while IFS= read -r name; do
+            if [[ -n "$name" && "$name" != "list" ]]; then
+                ACTIVE_WINDOWS_STR="${ACTIVE_WINDOWS_STR}${name}|"
+                ACTIVE_WINDOWS_COUNT=$(( ACTIVE_WINDOWS_COUNT + 1 ))
+            fi
+        done < <(tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name}' 2>/dev/null)
+    fi
     ACTIVE_WINDOWS_LAST_REFRESH=$now
 }
 
 is_session_active() {
-    local sid="$1"
-    local sid_short="${sid:0:8}"
-    echo "$ACTIVE_WINDOWS" | grep -qF "$sid_short" 2>/dev/null
+    [[ "$ACTIVE_WINDOWS_STR" == *"|${1:0:8}|"* ]]
 }
 
 extract_project_name() {
@@ -1059,8 +1069,7 @@ draw_border() {
 }
 
 draw_left_header() {
-    local active_count
-    active_count=$(tmux_active_count)
+    local active_count=${ACTIVE_WINDOWS_COUNT:-0}
     local title
     if [[ -n "$SEARCH_ACTIVE" ]]; then
         title=" Search: \"$SEARCH_ACTIVE\" ($SESSION_COUNT results)"
