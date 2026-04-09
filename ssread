@@ -1066,24 +1066,49 @@ launch_session_direct() {
 }
 
 # ── Drawing ────────────────────────────────────────────────────────────────
+CACHED_BORDER=""
+CACHED_BORDER_ROWS=0
+CACHED_BORDER_COLS=0
+
+_repeat_char() {
+    local count="$1" char="$2"
+    local pad
+    printf -v pad '%*s' "$count" ''
+    printf '%s' "${pad// /$char}"
+}
+
 draw_border() {
-    move_to 1 1
-    printf "┌"
-    printf "%0.s─" $(seq 1 "$LEFT_WIDTH")
-    printf "┬"
-    printf "%0.s─" $(seq 1 "$RIGHT_WIDTH")
-    printf "┐"
+    if (( TERM_ROWS == CACHED_BORDER_ROWS && TERM_COLS == CACHED_BORDER_COLS )); then
+        printf '%s' "$CACHED_BORDER"
+        return
+    fi
 
-    draw_vline 1 2 $(( TERM_ROWS - 2 )) "│"
-    draw_vline $(( LEFT_WIDTH + 2 )) 2 $(( TERM_ROWS - 2 )) "│"
-    draw_vline $(( TERM_COLS )) 2 $(( TERM_ROWS - 2 )) "│"
+    local buf=""
+    buf+=$(move_to 1 1)
+    buf+="┌"
+    buf+=$(_repeat_char "$LEFT_WIDTH" "─")
+    buf+="┬"
+    buf+=$(_repeat_char "$RIGHT_WIDTH" "─")
+    buf+="┐"
 
-    move_to $(( TERM_ROWS - 1 )) 1
-    printf "└"
-    printf "%0.s─" $(seq 1 "$LEFT_WIDTH")
-    printf "┴"
-    printf "%0.s─" $(seq 1 "$RIGHT_WIDTH")
-    printf "┘"
+    local r
+    for (( r=2; r<=TERM_ROWS-2; r++ )); do
+        buf+=$(move_to "$r" 1)"│"
+        buf+=$(move_to "$r" $(( LEFT_WIDTH + 2 )))"│"
+        buf+=$(move_to "$r" "$TERM_COLS")"│"
+    done
+
+    buf+=$(move_to $(( TERM_ROWS - 1 )) 1)
+    buf+="└"
+    buf+=$(_repeat_char "$LEFT_WIDTH" "─")
+    buf+="┴"
+    buf+=$(_repeat_char "$RIGHT_WIDTH" "─")
+    buf+="┘"
+
+    CACHED_BORDER="$buf"
+    CACHED_BORDER_ROWS=$TERM_ROWS
+    CACHED_BORDER_COLS=$TERM_COLS
+    printf '%s' "$buf"
 }
 
 draw_left_header() {
