@@ -1638,24 +1638,17 @@ handle_input() {
             if (( SESSION_COUNT > 0 )); then
                 local sid="${SESSION_IDS[$SELECTED]}"
                 local cwd="${SESSION_CWDS[$SELECTED]}"
-
-                # Check if session is already running in a tmux window
-                local existing_window
-                existing_window=$(tmux_find_session_window "$sid")
-
-                if [[ -n "$existing_window" ]]; then
-                    # Switch to existing window
-                    tmux_switch_to_window "$existing_window"
+                if [[ -n "${TMUX:-}" ]]; then
+                    pane_attach_session "$sid" "$cwd"
                 else
-                    # Launch in new tmux window
-                    tmux_launch_session "$sid" "$cwd"
+                    launch_session_direct "$sid" "$cwd"
                 fi
             fi
             ;;
         TAB)
-            # Switch to next tmux window
-            if [[ -n "${TMUX:-}" ]]; then
-                tmux next-window 2>/dev/null || true
+            if [[ -n "${TMUX:-}" ]] && pane_has_split; then
+                # Toggle focus to session pane
+                tmux select-pane -t "$TMUX_SESSION_NAME:list.1" 2>/dev/null || true
             fi
             ;;
         f)
@@ -1687,6 +1680,8 @@ handle_input() {
                 SCROLL_OFFSET=0
                 load_sessions
                 group_sessions
+            elif [[ -n "$ATTACHED_SID" ]]; then
+                pane_detach_current
             fi
             ;;
         r)
