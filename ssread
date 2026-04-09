@@ -1158,6 +1158,7 @@ launch_session_direct() {
 CACHED_BORDER=""
 CACHED_BORDER_ROWS=0
 CACHED_BORDER_COLS=0
+CACHED_BORDER_RW=0  # RIGHT_WIDTH when border was cached
 
 _repeat_char() {
     local count="$1" char="$2"
@@ -1167,7 +1168,7 @@ _repeat_char() {
 }
 
 draw_border() {
-    if (( TERM_ROWS == CACHED_BORDER_ROWS && TERM_COLS == CACHED_BORDER_COLS )); then
+    if (( TERM_ROWS == CACHED_BORDER_ROWS && TERM_COLS == CACHED_BORDER_COLS && RIGHT_WIDTH == CACHED_BORDER_RW )); then
         printf '%s' "$CACHED_BORDER"
         return
     fi
@@ -1176,27 +1177,34 @@ draw_border() {
     buf+=$(move_to 1 1)
     buf+="┌"
     buf+=$(_repeat_char "$LEFT_WIDTH" "─")
-    buf+="┬"
-    buf+=$(_repeat_char "$RIGHT_WIDTH" "─")
+    if (( RIGHT_WIDTH > 0 )); then
+        buf+="┬"
+        buf+=$(_repeat_char "$RIGHT_WIDTH" "─")
+    fi
     buf+="┐"
 
     local r
     for (( r=2; r<=TERM_ROWS-2; r++ )); do
         buf+=$(move_to "$r" 1)"│"
-        buf+=$(move_to "$r" $(( LEFT_WIDTH + 2 )))"│"
+        if (( RIGHT_WIDTH > 0 )); then
+            buf+=$(move_to "$r" $(( LEFT_WIDTH + 2 )))"│"
+        fi
         buf+=$(move_to "$r" "$TERM_COLS")"│"
     done
 
     buf+=$(move_to $(( TERM_ROWS - 1 )) 1)
     buf+="└"
     buf+=$(_repeat_char "$LEFT_WIDTH" "─")
-    buf+="┴"
-    buf+=$(_repeat_char "$RIGHT_WIDTH" "─")
+    if (( RIGHT_WIDTH > 0 )); then
+        buf+="┴"
+        buf+=$(_repeat_char "$RIGHT_WIDTH" "─")
+    fi
     buf+="┘"
 
     CACHED_BORDER="$buf"
     CACHED_BORDER_ROWS=$TERM_ROWS
     CACHED_BORDER_COLS=$TERM_COLS
+    CACHED_BORDER_RW=$RIGHT_WIDTH
     printf '%s' "$buf"
 }
 
@@ -1530,13 +1538,22 @@ draw_loading() {
 render() {
     get_dimensions
     refresh_active_windows
+    # Compact mode: hide detail panel when pane is narrow
+    if (( TERM_COLS < 80 )); then
+        LEFT_WIDTH=$(( TERM_COLS - 2 ))
+        RIGHT_WIDTH=0
+    fi
     local buf
     buf=$(
         draw_border
         draw_left_header
-        draw_right_header
+        if (( RIGHT_WIDTH > 0 )); then
+            draw_right_header
+        fi
         draw_session_list
-        draw_detail_panel
+        if (( RIGHT_WIDTH > 0 )); then
+            draw_detail_panel
+        fi
         draw_status_bar
     )
     printf "%s" "$buf"
