@@ -436,6 +436,24 @@ source_ssread_functions() {
     ! is_session_active "bbbb2222-cccc-dddd-eeee-ffffffffffff"
 }
 
+@test "is_session_needs_attention returns false when no silence" {
+    source_ssread_functions
+    SILENCE_WINDOWS_STR="|"
+    ! is_session_needs_attention "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+}
+
+@test "is_session_needs_attention returns true when silence flag set" {
+    source_ssread_functions
+    SILENCE_WINDOWS_STR="|aaaa1111|"
+    is_session_needs_attention "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+}
+
+@test "is_session_needs_attention returns false for non-matching session" {
+    source_ssread_functions
+    SILENCE_WINDOWS_STR="|aaaa1111|"
+    ! is_session_needs_attention "bbbb2222-cccc-dddd-eeee-ffffffffffff"
+}
+
 @test "tmux_active_count returns 0 when not in tmux" {
     source_ssread_functions
     unset TMUX 2>/dev/null || true

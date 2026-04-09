@@ -68,6 +68,7 @@ ensure_tmux_session() {
 
 # ── tmux Window Management ────────────────────────────────────────────────
 TMUX_SESSION_NAME=""
+ATTACHED_SID=""  # session ID currently shown in right pane (empty = no split)
 
 # Get the tmux session name we're running in
 get_tmux_session_name() {
@@ -92,7 +93,7 @@ tmux_find_session_window() {
     # Search window names for our session ID prefix
     tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_index} #{window_name}' 2>/dev/null \
         | while IFS=' ' read -r idx name; do
-            if [[ "$name" == "$sid_short" ]]; then
+            if [[ "$name" == "s:$sid_short" ]]; then
                 echo "$idx"
                 return
             fi
@@ -150,7 +151,7 @@ tmux_kill_all_sessions() {
 
     tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_index} #{window_name}' 2>/dev/null \
         | while IFS=' ' read -r idx name; do
-            if [[ "$name" != "list" ]]; then
+            if [[ "$name" == s:* ]]; then
                 tmux kill-window -t "$TMUX_SESSION_NAME:$idx" 2>/dev/null || true
             fi
         done
@@ -167,6 +168,70 @@ tmux_active_count() {
     count=$(tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name}' 2>/dev/null \
         | grep -cv '^list$' 2>/dev/null) || count=0
     echo "$count"
+}
+
+# ── Split-Pane Management ────────────────────────────────────────────────
+# Sessions run in hidden tmux windows (named "s:XXXXXXXX").
+# The "list" window shows ssread in pane 0; pane 1 is the active session.
+# break-pane/join-pane swaps which session is visible without killing processes.
+
+# Check if the list window currently has a right pane
+pane_has_split() {
+    tmux list-panes -t "$TMUX_SESSION_NAME:list" -F '#{pane_index}' 2>/dev/null \
+        | grep -q '^1$'
+}
+
+# Detach current right pane back to its hidden window
+pane_detach_current() {
+    if [[ -z "$ATTACHED_SID" ]] || ! pane_has_split; then
+        ATTACHED_SID=""
+        return
+    fi
+    local sid_short="${ATTACHED_SID:0:8}"
+    tmux break-pane -d -s "$TMUX_SESSION_NAME:list.1" -n "s:$sid_short" 2>/dev/null || true
+    ATTACHED_SID=""
+}
+
+# Launch (if needed) and attach a session to the right pane
+pane_attach_session() {
+    local sid="$1"
+    local cwd="$2"
+    local sid_short="${sid:0:8}"
+
+    # Already showing this session — just refocus
+    if [[ "$ATTACHED_SID" == "$sid" ]] && pane_has_split; then
+        tmux select-pane -t "$TMUX_SESSION_NAME:list.1" 2>/dev/null || true
+        return
+    fi
+
+    # Detach whatever is currently in right pane
+    pane_detach_current
+
+    # Check if this session already has a hidden window
+    local has_window=false
+    if tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name}' 2>/dev/null \
+        | grep -qF "s:$sid_short"; then
+        has_window=true
+    fi
+
+    if ! $has_window; then
+        # Create new hidden window with claude session
+        local cd_cmd=""
+        if [[ -n "$cwd" && -d "$cwd" ]]; then
+            cd_cmd="cd $(printf '%q' "$cwd") && "
+        fi
+        tmux new-window -d -t "$TMUX_SESSION_NAME" -n "s:$sid_short" \
+            "${cd_cmd}claude --resume '$sid'; echo ''; echo 'Session ended. Press any key to close.'; read -rsn1"
+        # Enable silence monitoring for notification
+        tmux set-option -t "$TMUX_SESSION_NAME:s:$sid_short" monitor-silence 15 2>/dev/null || true
+    fi
+
+    # Join the hidden window into right pane
+    tmux join-pane -h -s "$TMUX_SESSION_NAME:s:$sid_short" -t "$TMUX_SESSION_NAME:list.0" -l 60% 2>/dev/null || true
+    ATTACHED_SID="$sid"
+
+    # Focus the session pane so user can type
+    tmux select-pane -t "$TMUX_SESSION_NAME:list.1" 2>/dev/null || true
 }
 
 # ── Terminal Setup ─────────────────────────────────────────────────────────
@@ -316,34 +381,44 @@ declare -a GROUP_COUNTS=()
 GROUP_COUNT=0
 
 # Cache of active tmux window names (refreshed periodically)
-# Stored as "|name1|name2|name3|" for fast substring match without subprocess
+# Windows use "s:XXXXXXXX" naming convention. We strip the prefix for matching.
+# Stored as "|sid1|sid2|" for fast substring match without subprocess.
 ACTIVE_WINDOWS_STR="|"
 ACTIVE_WINDOWS_COUNT=0
+SILENCE_WINDOWS_STR="|"
 ACTIVE_WINDOWS_LAST_REFRESH=0
 
 refresh_active_windows() {
-    local now
-    now=$(now_epoch)
+    local now=${EPOCHSECONDS:-$(date +%s)}
     # Refresh at most every 2 seconds
     if (( now - ACTIVE_WINDOWS_LAST_REFRESH < 2 )); then
         return
     fi
     ACTIVE_WINDOWS_STR="|"
     ACTIVE_WINDOWS_COUNT=0
+    SILENCE_WINDOWS_STR="|"
     if [[ -n "${TMUX:-}" ]]; then
-        local name
-        while IFS= read -r name; do
-            if [[ -n "$name" && "$name" != "list" ]]; then
-                ACTIVE_WINDOWS_STR="${ACTIVE_WINDOWS_STR}${name}|"
+        local name flag
+        while IFS=' ' read -r name flag; do
+            if [[ "$name" == s:* ]]; then
+                local sid_part="${name#s:}"
+                ACTIVE_WINDOWS_STR="${ACTIVE_WINDOWS_STR}${sid_part}|"
                 ACTIVE_WINDOWS_COUNT=$(( ACTIVE_WINDOWS_COUNT + 1 ))
+                if [[ "$flag" == "1" ]]; then
+                    SILENCE_WINDOWS_STR="${SILENCE_WINDOWS_STR}${sid_part}|"
+                fi
             fi
-        done < <(tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name}' 2>/dev/null)
+        done < <(tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name} #{window_silence_flag}' 2>/dev/null)
     fi
     ACTIVE_WINDOWS_LAST_REFRESH=$now
 }
 
 is_session_active() {
     [[ "$ACTIVE_WINDOWS_STR" == *"|${1:0:8}|"* ]]
+}
+
+is_session_needs_attention() {
+    [[ "$SILENCE_WINDOWS_STR" == *"|${1:0:8}|"* ]]
 }
 
 extract_project_name() {
