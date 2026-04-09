@@ -429,7 +429,7 @@ load_sessions() {
             ts: (.timestamp // ""),
             cwd: (.cwd // ""),
             branch: (.gitBranch // ""),
-            msg: ((.message.content // "") | if type == "string" then .[0:100] else "" end)
+            msg: ((.message.content // "") | if type == "string" then . elif type == "array" then [.[] | if .type == "tool_result" then (.content | if type == "string" then . elif type == "array" then [.[] | select(.type == "text") | .text] | join(" ") else "" end) elif .type == "text" then .text else "" end] | join(" ") else "" end | gsub("<[^>]+>"; "") | gsub("\\s+"; " ") | ltrimstr(" ") | .[0:100])
         }' 2>/dev/null) || continue
 
         local sid ts cwd branch first_msg
@@ -558,7 +558,7 @@ load_session_detail() {
 
     local detail
     detail=$(jq -s '{
-        last_msg: ([.[] | select(.type == "user") | .message.content // ""] | last // "" | if type == "string" then .[0:120] else "" end),
+        last_msg: ([.[] | select(.type == "user") | .message.content // ""] | last // "" | if type == "string" then . elif type == "array" then [.[] | if .type == "tool_result" then (.content | if type == "string" then . elif type == "array" then [.[] | select(.type == "text") | .text] | join(" ") else "" end) elif .type == "text" then .text else "" end] | join(" ") else "" end | gsub("<[^>]+>"; "") | gsub("\\s+"; " ") | ltrimstr(" ") | .[0:120]),
         msg_count: ([.[] | select(.type == "user")] | length),
         total_output: ([.[] | select(.type == "assistant") | .message.usage.output_tokens // 0] | add // 0),
         tool_count: ([.[] | select(.type == "assistant") | .message.content[]? | select(.type == "tool_use")] | length),
@@ -1492,6 +1492,8 @@ draw_loading() {
     printf "${BOLD}${FG_CYAN}ssread${RESET}${FG_GRAY} loading sessions...${RESET}"
 }
 
+PREV_RIGHT_WIDTH=-1
+
 render() {
     get_dimensions
     refresh_active_windows
@@ -1499,6 +1501,12 @@ render() {
     if (( TERM_COLS < 80 )); then
         LEFT_WIDTH=$(( TERM_COLS - 2 ))
         RIGHT_WIDTH=0
+    fi
+    # Clear screen on layout mode change to avoid ghost text
+    if (( RIGHT_WIDTH != PREV_RIGHT_WIDTH )); then
+        clear_screen
+        CACHED_BORDER_ROWS=0  # force border redraw
+        PREV_RIGHT_WIDTH=$RIGHT_WIDTH
     fi
     local buf
     buf=$(
