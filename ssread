@@ -128,19 +128,14 @@ tmux_active_count() {
 }
 
 # ── Split-Pane Management ────────────────────────────────────────────────
-# Layout: pane 0 (ssread, left) | pane 1 (detail watcher, top-right)
-#                                | pane 2 (session, bottom-right)
-# Sessions run in hidden tmux windows (named "s:XXXXXXXX").
-# break-pane/join-pane swaps sessions without killing processes.
+# Fixed 3-pane layout (created once at startup):
+#   pane 0 (left)        : ssread TUI (list only)
+#   pane 1 (top-right)   : detail watcher (polls DETAIL_FILE)
+#   pane 2 (bottom-right): session or placeholder
+# Session swapping uses tmux swap-pane — layout never changes.
 
 DETAIL_FILE="/tmp/ssread_detail_$$"
-
-# Check if session pane is attached (more than 1 pane in list window)
-pane_has_split() {
-    local count
-    count=$(tmux list-panes -t "$TMUX_SESSION_NAME:list" 2>/dev/null | wc -l | tr -d ' ')
-    (( count > 1 ))
-}
+LAYOUT_ACTIVE=false  # true once 3-pane layout is set up
 
 # Write detail info to temp file for the detail watcher pane
 write_detail_file() {
@@ -191,6 +186,26 @@ write_detail_file() {
     } > "$DETAIL_FILE"
 }
 
+# Create the fixed 3-pane layout (called once at startup)
+setup_pane_layout() {
+    if [[ -z "${TMUX:-}" ]]; then
+        return
+    fi
+
+    write_detail_file
+
+    # pane 1: detail watcher (top-right)
+    local watcher_cmd="f='${DETAIL_FILE}'; prev=''; tput civis 2>/dev/null; while true; do cur=\$(cat \"\$f\" 2>/dev/null || true); if [ \"\$cur\" != \"\$prev\" ]; then printf '\\033[H\\033[2J%s' \"\$cur\"; prev=\"\$cur\"; fi; sleep 0.3; done"
+    tmux split-window -h -d -t "$TMUX_SESSION_NAME:list.0" -l 55% "$watcher_cmd" 2>/dev/null || true
+
+    # pane 2: placeholder (bottom-right)
+    local placeholder_cmd="tput civis 2>/dev/null; printf '\\033[H\\033[2J\\n\\033[90m  No session attached\\n\\n  Press Enter on a session to attach\\033[0m'; while true; do sleep 86400; done"
+    tmux split-window -v -d -t "$TMUX_SESSION_NAME:list.1" -l 70% "$placeholder_cmd" 2>/dev/null || true
+
+    sleep 0.1
+    LAYOUT_ACTIVE=true
+}
+
 # Ensure a hidden tmux window exists for the given session
 _ensure_session_window() {
     local sid="$1" cwd="$2"
@@ -210,74 +225,40 @@ _ensure_session_window() {
     tmux set-option -t "$TMUX_SESSION_NAME:s:$sid_short" monitor-silence 15 2>/dev/null || true
 }
 
-# Create the 3-pane layout and join a session window into it
-_create_split_layout() {
-    local session_win="$1"  # e.g. "s:aaaa1111"
-
-    # Write initial detail content
-    write_detail_file
-
-    # Step 1: split ssread (pane 0) horizontally → pane 0 (left) + pane 1 (detail watcher, right)
-    local watcher_cmd="f='${DETAIL_FILE}'; prev=''; tput civis 2>/dev/null; while true; do cur=\$(cat \"\$f\" 2>/dev/null || true); if [ \"\$cur\" != \"\$prev\" ]; then printf '\\033[H\\033[2J%s' \"\$cur\"; prev=\"\$cur\"; fi; sleep 0.3; done"
-    tmux split-window -h -d -t "$TMUX_SESSION_NAME:list.0" -l 55% "$watcher_cmd" 2>/dev/null || true
-
-    # Step 2: join session into bottom-right (split pane 1 vertically)
-    tmux join-pane -v -s "$TMUX_SESSION_NAME:$session_win" -t "$TMUX_SESSION_NAME:list.1" -l 70% 2>/dev/null || true
-
-    # Brief wait for tmux to settle pty dimensions
-    sleep 0.05
-    CACHED_BORDER_ROWS=0
-    PREV_RIGHT_WIDTH=-1
-
-    # Focus session pane (pane 2)
-    tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
-}
-
-# Detach current session: break session pane to hidden window, kill detail watcher
+# Swap pane 2 with a hidden session window (layout stays fixed)
 pane_detach_current() {
-    if [[ -z "$ATTACHED_SID" ]] || ! pane_has_split; then
-        ATTACHED_SID=""
+    if [[ -z "$ATTACHED_SID" ]]; then
         return
     fi
     local sid_short="${ATTACHED_SID:0:8}"
-
-    # Break session pane (pane 2) back to hidden window
-    if tmux list-panes -t "$TMUX_SESSION_NAME:list" -F '#{pane_index}' 2>/dev/null | grep -q '^2$'; then
-        tmux break-pane -d -s "$TMUX_SESSION_NAME:list.2" -n "s:$sid_short" 2>/dev/null || true
-    fi
-
-    # Kill detail watcher pane (pane 1)
-    if tmux list-panes -t "$TMUX_SESSION_NAME:list" -F '#{pane_index}' 2>/dev/null | grep -q '^1$'; then
-        tmux kill-pane -t "$TMUX_SESSION_NAME:list.1" 2>/dev/null || true
-    fi
-
+    # Swap session back to its hidden window (placeholder returns to pane 2)
+    tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:s:$sid_short.0" 2>/dev/null || true
     ATTACHED_SID=""
-    sleep 0.05
-    CACHED_BORDER_ROWS=0
-    PREV_RIGHT_WIDTH=-1
 }
 
-# Launch (if needed) and attach a session to the right pane
 pane_attach_session() {
     local sid="$1"
     local cwd="$2"
     local sid_short="${sid:0:8}"
 
     # Already showing this session — just refocus
-    if [[ "$ATTACHED_SID" == "$sid" ]] && pane_has_split; then
+    if [[ "$ATTACHED_SID" == "$sid" ]]; then
         tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
         return
     fi
 
-    # Detach whatever is currently attached
+    # Swap current session back to its hidden window
     pane_detach_current
 
     # Ensure hidden window exists
     _ensure_session_window "$sid" "$cwd"
 
-    # Create 3-pane layout with this session
-    _create_split_layout "s:$sid_short"
+    # Swap placeholder (pane 2) with the session's hidden window
+    tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:s:$sid_short.0" 2>/dev/null || true
     ATTACHED_SID="$sid"
+
+    # Focus session pane
+    tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
 }
 
 # ── Terminal Setup ─────────────────────────────────────────────────────────
@@ -323,6 +304,9 @@ restore_tmux_keybindings() {
 cleanup() {
     restore_tmux_keybindings
     rm -f "$DETAIL_FILE" 2>/dev/null || true
+    # Kill detail watcher and placeholder/session panes
+    tmux kill-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
+    tmux kill-pane -t "$TMUX_SESSION_NAME:list.1" 2>/dev/null || true
     tput rmcup        # restore screen
     tput cnorm        # show cursor
     if [[ -n "$ORIG_STTY" ]]; then
@@ -1031,8 +1015,9 @@ fork_session() {
     tmux new-window -d -t "$TMUX_SESSION_NAME" -n "$win_name" \
         "${cd_cmd}claude \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'; echo ''; echo 'Session ended. Press any key to close.'; read -rsn1"
     tmux set-option -t "$TMUX_SESSION_NAME:$win_name" monitor-silence 15 2>/dev/null || true
-    _create_split_layout "$win_name"
+    tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:$win_name.0" 2>/dev/null || true
     ATTACHED_SID="fork:${parent_sid_short}"
+    tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
 }
 
 # ── Command Mode ───────────────────────────────────────────────────────────
@@ -1140,8 +1125,9 @@ cmd_new_session() {
         tmux new-window -d -t "$TMUX_SESSION_NAME" -n "$pane_win_name" \
             "${cd_cmd}${branch_cmd}${claude_cmd}; echo ''; echo 'Session ended. Press any key to close.'; read -rsn1"
         tmux set-option -t "$TMUX_SESSION_NAME:$pane_win_name" monitor-silence 15 2>/dev/null || true
-        _create_split_layout "$pane_win_name"
+        tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:$pane_win_name.0" 2>/dev/null || true
         ATTACHED_SID="new:${win_name}"
+        tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
     fi
 
     # Refresh session list after short delay for the new session to register
@@ -1611,8 +1597,13 @@ PREV_RIGHT_WIDTH=-1
 render() {
     get_dimensions
     refresh_active_windows
-    # Compact mode: hide detail panel when pane is narrow
-    if (( TERM_COLS < 80 )); then
+    # In 3-pane layout, ssread is always in the left pane (list only)
+    if $LAYOUT_ACTIVE; then
+        LEFT_WIDTH=$(( TERM_COLS - 2 ))
+        RIGHT_WIDTH=0
+        # Update detail file for the watcher pane
+        write_detail_file
+    elif (( TERM_COLS < 80 )); then
         LEFT_WIDTH=$(( TERM_COLS - 2 ))
         RIGHT_WIDTH=0
     fi
@@ -1621,10 +1612,6 @@ render() {
         clear_screen
         CACHED_BORDER_ROWS=0  # force border redraw
         PREV_RIGHT_WIDTH=$RIGHT_WIDTH
-    fi
-    # When split, update detail file for the watcher pane
-    if [[ -n "$ATTACHED_SID" ]] && pane_has_split; then
-        write_detail_file
     fi
     local buf
     buf=$(
@@ -1771,7 +1758,7 @@ handle_input() {
             fi
             ;;
         TAB)
-            if [[ -n "${TMUX:-}" ]] && pane_has_split; then
+            if [[ -n "${TMUX:-}" && -n "$ATTACHED_SID" ]]; then
                 # Toggle focus to session pane (pane 2 in 3-pane layout)
                 tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
             fi
@@ -1875,6 +1862,7 @@ main() {
     load_sessions
     group_sessions
     clear_screen
+    setup_pane_layout
 
     while true; do
         render
