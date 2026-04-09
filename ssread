@@ -203,10 +203,36 @@ setup_terminal() {
     tput smcup        # alternate screen buffer
     tput civis        # hide cursor
     stty -echo -icanon min 1 time 0
+    setup_tmux_keybindings
     trap cleanup EXIT INT TERM
 }
 
+# Set up tmux key bindings for pane navigation within ssread session.
+# Ctrl+b 0 → focus pane 0 (list),  Ctrl+b Tab → toggle between panes
+setup_tmux_keybindings() {
+    if [[ -z "${TMUX:-}" || -z "$TMUX_SESSION_NAME" ]]; then
+        return
+    fi
+    # Save original bindings for later restoration
+    ORIG_BIND_0=$(tmux list-keys 2>/dev/null | grep "^bind-key.*\"0\"" | head -1) || true
+    ORIG_BIND_TAB=$(tmux list-keys 2>/dev/null | grep "^bind-key.*\"Tab\"" | head -1) || true
+    # Bind "0" to select list pane (normally selects window 0)
+    tmux bind-key 0 select-pane -t "$TMUX_SESSION_NAME:list.0" 2>/dev/null || true
+    # Bind Tab to toggle between panes (normally last-window)
+    tmux bind-key Tab last-pane 2>/dev/null || true
+}
+
+# Restore default tmux key bindings
+restore_tmux_keybindings() {
+    if [[ -z "${TMUX:-}" ]]; then
+        return
+    fi
+    tmux bind-key 0 select-window -t :0 2>/dev/null || true
+    tmux bind-key Tab last-window 2>/dev/null || true
+}
+
 cleanup() {
+    restore_tmux_keybindings
     tput rmcup        # restore screen
     tput cnorm        # show cursor
     if [[ -n "$ORIG_STTY" ]]; then
@@ -1479,7 +1505,7 @@ draw_status_bar() {
         local bar_text=" ↑↓ Navigate  Enter: Open  Esc: Clear search  /: New search  r: Refresh"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     else
-        local bar_text=" j/k Nav  Enter: Attach  Tab: Focus  Esc: Detach  f: Fork  :: Cmd  /: Search  q: Quit"
+        local bar_text=" j/k Nav  Enter: Attach  ^b0: List  ^bTab: Toggle  Esc: Detach  f: Fork  /: Search  q: Quit"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     fi
 }
