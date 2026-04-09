@@ -147,6 +147,10 @@ pane_detach_current() {
     local sid_short="${ATTACHED_SID:0:8}"
     tmux break-pane -d -s "$TMUX_SESSION_NAME:list.1" -n "s:$sid_short" 2>/dev/null || true
     ATTACHED_SID=""
+    # Brief wait for tmux to update pty dimensions after resize
+    sleep 0.05
+    CACHED_BORDER_ROWS=0
+    PREV_RIGHT_WIDTH=-1
 }
 
 # Launch (if needed) and attach a session to the right pane
@@ -186,6 +190,12 @@ pane_attach_session() {
     # Join the hidden window into right pane
     tmux join-pane -h -s "$TMUX_SESSION_NAME:s:$sid_short" -t "$TMUX_SESSION_NAME:list.0" -l 60% 2>/dev/null || true
     ATTACHED_SID="$sid"
+
+    # Brief wait for tmux to update pty dimensions after resize
+    sleep 0.05
+    # Force full redraw on next render cycle
+    CACHED_BORDER_ROWS=0
+    PREV_RIGHT_WIDTH=-1
 
     # Focus the session pane so user can type
     tmux select-pane -t "$TMUX_SESSION_NAME:list.1" 2>/dev/null || true
@@ -1555,8 +1565,13 @@ _KEY=""
 
 read_key() {
     _KEY=""
-    local c
-    IFS= read -rsn1 c || true
+    local c="" _read_rc=0
+    # Timeout after 2s so we periodically re-render (catches pane resizes, activity updates)
+    IFS= read -rsn1 -t 2 c || _read_rc=$?
+    if (( _read_rc > 0 )) && [[ -z "$c" ]]; then
+        # Timeout or signal — return empty key to trigger re-render
+        return
+    fi
     if [[ "$c" == $'\x1b' ]]; then
         local seq=""
         IFS= read -rsn1 -t 1 seq || true
