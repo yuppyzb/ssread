@@ -1316,7 +1316,11 @@ draw_session_list() {
 
             # Status indicators
             local marks=""
-            if is_session_active "${SESSION_IDS[$i]}"; then
+            if [[ "$ATTACHED_SID" == "${SESSION_IDS[$i]}" ]]; then
+                marks="${marks} ◀"
+            elif is_session_needs_attention "${SESSION_IDS[$i]}"; then
+                marks="${marks} 🔔"
+            elif is_session_active "${SESSION_IDS[$i]}"; then
                 marks="${marks} ▸"
             fi
             local ctx_val="${SESSION_CTX[$i]}"
@@ -1392,7 +1396,11 @@ draw_detail_panel() {
     # ── Header ──
     print_at_styled "$row" "$col" "$width" "${BOLD}${FG_YELLOW}" "  Session"
     row=$(( row + 1 ))
-    if is_session_active "$sid"; then
+    if [[ "$ATTACHED_SID" == "$sid" ]]; then
+        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_GREEN}◀ attached"
+    elif is_session_needs_attention "$sid"; then
+        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_YELLOW}🔔 needs input"
+    elif is_session_active "$sid"; then
         print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_GREEN}▸ running"
     else
         print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid"
@@ -1506,7 +1514,7 @@ draw_status_bar() {
         local bar_text=" ↑↓ Navigate  Enter: Open  Esc: Clear search  /: New search  r: Refresh"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     else
-        local bar_text=" ↑↓ Navigate  Enter: Open  f: Fork  :: Command  /: Search  q: Quit  r: Refresh"
+        local bar_text=" j/k Nav  Enter: Attach  Tab: Focus  Esc: Detach  f: Fork  :: Cmd  /: Search  q: Quit"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     fi
 }
