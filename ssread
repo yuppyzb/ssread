@@ -280,6 +280,8 @@ declare -a SESSION_FIRST_MSG=()   # first user message (session summary)
 declare -a SESSION_MODELS=()      # model name from last assistant message
 declare -a SESSION_CTX=()         # last context size in tokens
 declare -a SESSION_FORK_FROM=()   # parent session ID (short) if forked, empty otherwise
+declare -a SESSION_MODEL_SHORT=() # pre-computed short model name
+declare -a SESSION_CTX_SHORT=()   # pre-computed formatted token count
 
 CTX_WARN_THRESHOLD=80000  # show ⚠ when context exceeds this
 
@@ -363,6 +365,8 @@ load_sessions() {
     SESSION_MODELS=()
     SESSION_CTX=()
     SESSION_FORK_FROM=()
+    SESSION_MODEL_SHORT=()
+    SESSION_CTX_SHORT=()
     SESSION_COUNT=0
     DETAIL_SID=""  # invalidate cached detail
 
@@ -459,6 +463,8 @@ load_sessions() {
         SESSION_MODELS+=("$model")
         SESSION_CTX+=("$ctx")
         SESSION_FORK_FROM+=("$fork_from")
+        SESSION_MODEL_SHORT+=("$(format_model_short "$model")")
+        SESSION_CTX_SHORT+=("$(format_tokens "$ctx")")
 
         if [[ -n "$ts" && "$epoch" -gt 0 ]]; then
             SESSION_ELAPSED+=("$(format_elapsed "$epoch")")
@@ -592,6 +598,7 @@ group_sessions() {
     local -a nw_TIMESTAMPS=() nw_PROJECTS=() nw_BRANCHES=()
     local -a nw_FIRST_MSG=() nw_CWDS=() nw_EPOCH=()
     local -a nw_MODELS=() nw_CTX=() nw_FORK_FROM=()
+    local -a nw_MODEL_SHORT=() nw_CTX_SHORT=()
 
     for idx in "${order[@]}"; do
         nw_FILES+=("${SESSION_FILES[$idx]}")
@@ -607,6 +614,8 @@ group_sessions() {
         nw_MODELS+=("${SESSION_MODELS[$idx]}")
         nw_CTX+=("${SESSION_CTX[$idx]}")
         nw_FORK_FROM+=("${SESSION_FORK_FROM[$idx]}")
+        nw_MODEL_SHORT+=("${SESSION_MODEL_SHORT[$idx]}")
+        nw_CTX_SHORT+=("${SESSION_CTX_SHORT[$idx]}")
     done
 
     SESSION_FILES=("${nw_FILES[@]}")
@@ -622,6 +631,8 @@ group_sessions() {
     SESSION_MODELS=("${nw_MODELS[@]}")
     SESSION_CTX=("${nw_CTX[@]}")
     SESSION_FORK_FROM=("${nw_FORK_FROM[@]}")
+    SESSION_MODEL_SHORT=("${nw_MODEL_SHORT[@]}")
+    SESSION_CTX_SHORT=("${nw_CTX_SHORT[@]}")
 }
 
 # ── Search with BM25 scoring ──────────────────────────────────────────────
@@ -760,6 +771,8 @@ search_sessions() {
         SESSION_MODELS=()
         SESSION_CTX=()
         SESSION_FORK_FROM=()
+        SESSION_MODEL_SHORT=()
+        SESSION_CTX_SHORT=()
         SESSION_COUNT=0
         return
     fi
@@ -783,6 +796,7 @@ search_sessions() {
     local -a new_TIMESTAMPS=() new_PROJECTS=() new_BRANCHES=()
     local -a new_FIRST_MSG=() new_CWDS=() new_EPOCH=()
     local -a new_MODELS=() new_CTX=() new_FORK_FROM=()
+    local -a new_MODEL_SHORT=() new_CTX_SHORT=()
 
     for (( x=0; x<count; x++ )); do
         local idx="${scored_indices[$x]}"
@@ -799,6 +813,8 @@ search_sessions() {
         new_MODELS+=("${SESSION_MODELS[$idx]}")
         new_CTX+=("${SESSION_CTX[$idx]}")
         new_FORK_FROM+=("${SESSION_FORK_FROM[$idx]}")
+        new_MODEL_SHORT+=("${SESSION_MODEL_SHORT[$idx]}")
+        new_CTX_SHORT+=("${SESSION_CTX_SHORT[$idx]}")
     done
 
     SESSION_FILES=("${new_FILES[@]}")
@@ -814,6 +830,8 @@ search_sessions() {
     SESSION_MODELS=("${new_MODELS[@]}")
     SESSION_CTX=("${new_CTX[@]}")
     SESSION_FORK_FROM=("${new_FORK_FROM[@]}")
+    SESSION_MODEL_SHORT=("${new_MODEL_SHORT[@]}")
+    SESSION_CTX_SHORT=("${new_CTX_SHORT[@]}")
     SESSION_COUNT=$count
 }
 
@@ -1178,10 +1196,8 @@ draw_session_list() {
             local sid_short="${SESSION_IDS[$i]:0:8}"
             local elapsed="${SESSION_ELAPSED[$i]}"
             local branch="${SESSION_BRANCHES[$i]}"
-            local model_short
-            model_short=$(format_model_short "${SESSION_MODELS[$i]}")
-            local ctx_short
-            ctx_short=$(format_tokens "${SESSION_CTX[$i]}")
+            local model_short="${SESSION_MODEL_SHORT[$i]}"
+            local ctx_short="${SESSION_CTX_SHORT[$i]}"
             local first_msg="${SESSION_FIRST_MSG[$i]}"
 
             # Status indicators
