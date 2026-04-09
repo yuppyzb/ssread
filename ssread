@@ -279,6 +279,9 @@ declare -a SESSION_EPOCH=()
 declare -a SESSION_FIRST_MSG=()   # first user message (session summary)
 declare -a SESSION_MODELS=()      # model name from last assistant message
 declare -a SESSION_CTX=()         # last context size in tokens
+declare -a SESSION_FORK_FROM=()   # parent session ID (short) if forked, empty otherwise
+
+CTX_WARN_THRESHOLD=80000  # show ⚠ when context exceeds this
 
 SESSION_COUNT=0
 SELECTED=0
@@ -344,6 +347,7 @@ load_sessions() {
     SESSION_FIRST_MSG=()
     SESSION_MODELS=()
     SESSION_CTX=()
+    SESSION_FORK_FROM=()
     SESSION_COUNT=0
     DETAIL_SID=""  # invalidate cached detail
 
@@ -414,6 +418,20 @@ load_sessions() {
         local project_name
         project_name=$(extract_project_name "$dir_name")
 
+        # Detect fork marker: [forked-from:XXXXXXXX]
+        local fork_from=""
+        if [[ "$first_msg" =~ ^\[forked-from:([a-f0-9]+)\] ]]; then
+            fork_from="${BASH_REMATCH[1]}"
+            # Strip marker + preamble, show the context line
+            first_msg=$(printf '%s' "$first_msg" | sed 's/^\[forked-from:[a-f0-9]*\] *//')
+            # Try to extract just the context part
+            local ctx_line
+            ctx_line=$(printf '%s' "$first_msg" | sed -n 's/.*작업 컨텍스트: *//p')
+            if [[ -n "$ctx_line" ]]; then
+                first_msg="$ctx_line"
+            fi
+        fi
+
         SESSION_FILES+=("$filepath")
         SESSION_IDS+=("$sid")
         SESSION_TIMESTAMPS+=("$ts")
@@ -425,6 +443,7 @@ load_sessions() {
         SESSION_FIRST_MSG+=("$first_msg")
         SESSION_MODELS+=("$model")
         SESSION_CTX+=("$ctx")
+        SESSION_FORK_FROM+=("$fork_from")
 
         if [[ -n "$ts" && "$epoch" -gt 0 ]]; then
             SESSION_ELAPSED+=("$(format_elapsed "$epoch")")
@@ -557,7 +576,7 @@ group_sessions() {
     local -a nw_FILES=() nw_IDS=() nw_ELAPSED=() nw_DIRS=()
     local -a nw_TIMESTAMPS=() nw_PROJECTS=() nw_BRANCHES=()
     local -a nw_FIRST_MSG=() nw_CWDS=() nw_EPOCH=()
-    local -a nw_MODELS=() nw_CTX=()
+    local -a nw_MODELS=() nw_CTX=() nw_FORK_FROM=()
 
     for idx in "${order[@]}"; do
         nw_FILES+=("${SESSION_FILES[$idx]}")
@@ -572,6 +591,7 @@ group_sessions() {
         nw_EPOCH+=("${SESSION_EPOCH[$idx]}")
         nw_MODELS+=("${SESSION_MODELS[$idx]}")
         nw_CTX+=("${SESSION_CTX[$idx]}")
+        nw_FORK_FROM+=("${SESSION_FORK_FROM[$idx]}")
     done
 
     SESSION_FILES=("${nw_FILES[@]}")
@@ -586,6 +606,7 @@ group_sessions() {
     SESSION_EPOCH=("${nw_EPOCH[@]}")
     SESSION_MODELS=("${nw_MODELS[@]}")
     SESSION_CTX=("${nw_CTX[@]}")
+    SESSION_FORK_FROM=("${nw_FORK_FROM[@]}")
 }
 
 # ── Search with BM25 scoring ──────────────────────────────────────────────
@@ -723,6 +744,7 @@ search_sessions() {
         SESSION_EPOCH=()
         SESSION_MODELS=()
         SESSION_CTX=()
+        SESSION_FORK_FROM=()
         SESSION_COUNT=0
         return
     fi
@@ -745,7 +767,7 @@ search_sessions() {
     local -a new_FILES=() new_IDS=() new_ELAPSED=() new_DIRS=()
     local -a new_TIMESTAMPS=() new_PROJECTS=() new_BRANCHES=()
     local -a new_FIRST_MSG=() new_CWDS=() new_EPOCH=()
-    local -a new_MODELS=() new_CTX=()
+    local -a new_MODELS=() new_CTX=() new_FORK_FROM=()
 
     for (( x=0; x<count; x++ )); do
         local idx="${scored_indices[$x]}"
@@ -761,6 +783,7 @@ search_sessions() {
         new_EPOCH+=("${SESSION_EPOCH[$idx]}")
         new_MODELS+=("${SESSION_MODELS[$idx]}")
         new_CTX+=("${SESSION_CTX[$idx]}")
+        new_FORK_FROM+=("${SESSION_FORK_FROM[$idx]}")
     done
 
     SESSION_FILES=("${new_FILES[@]}")
@@ -775,7 +798,53 @@ search_sessions() {
     SESSION_EPOCH=("${new_EPOCH[@]}")
     SESSION_MODELS=("${new_MODELS[@]}")
     SESSION_CTX=("${new_CTX[@]}")
+    SESSION_FORK_FROM=("${new_FORK_FROM[@]}")
     SESSION_COUNT=$count
+}
+
+# ── Fork Session ───────────────────────────────────────────────────────────
+fork_session() {
+    local idx="$1"
+    local parent_sid="${SESSION_IDS[$idx]}"
+    local parent_sid_short="${parent_sid:0:8}"
+    local cwd="${SESSION_CWDS[$idx]}"
+    local first_msg="${SESSION_FIRST_MSG[$idx]}"
+    local branch="${SESSION_BRANCHES[$idx]}"
+
+    # Build fork prompt
+    local fork_prompt="[forked-from:${parent_sid_short}] 이전 세션(${parent_sid_short})의 작업을 이어갑니다. 작업 컨텍스트: ${first_msg}"
+    if [[ -n "$branch" ]]; then
+        fork_prompt="${fork_prompt} (branch: ${branch})"
+    fi
+    fork_prompt="${fork_prompt}
+
+이전 세션의 context가 커서 새 세션으로 fork했습니다. 위 맥락을 기반으로 작업을 계속해주세요."
+
+    local cd_cmd=""
+    if [[ -n "$cwd" && -d "$cwd" ]]; then
+        cd_cmd="cd $(printf '%q' "$cwd") && "
+    fi
+
+    if [[ -z "${TMUX:-}" ]]; then
+        # Non-tmux fallback: direct launch
+        tput rmcup; tput cnorm
+        if [[ -n "$ORIG_STTY" ]]; then stty "$ORIG_STTY" 2>/dev/null || true; fi
+        clear_screen
+        if [[ -n "$cwd" && -d "$cwd" ]]; then cd "$cwd"; fi
+        set +e
+        claude "$fork_prompt"
+        set -e
+        tput smcup; tput civis; stty -echo -icanon min 1 time 0
+        clear_screen
+        return
+    fi
+
+    # Write prompt to temp file (handles long/multiline prompts safely)
+    local prompt_file="/tmp/ssread_fork_$$_$(date +%s)"
+    printf '%s' "$fork_prompt" > "$prompt_file"
+
+    tmux new-window -t "$TMUX_SESSION_NAME" -n "f:${parent_sid_short}" \
+        "${cd_cmd}claude \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
 }
 
 # ── Session Launch (fallback for non-tmux) ─────────────────────────────────
@@ -944,23 +1013,31 @@ draw_session_list() {
             ctx_short=$(format_tokens "${SESSION_CTX[$i]}")
             local first_msg="${SESSION_FIRST_MSG[$i]}"
 
-            local run_mark=""
+            # Status indicators
+            local marks=""
             if is_session_active "${SESSION_IDS[$i]}"; then
-                run_mark=" ▸"
+                marks="${marks} ▸"
+            fi
+            local ctx_val="${SESSION_CTX[$i]}"
+            if (( ctx_val > CTX_WARN_THRESHOLD )); then
+                marks="${marks} ⚠"
+            fi
+            if [[ -n "${SESSION_FORK_FROM[$i]}" ]]; then
+                marks="${marks} ⑂${SESSION_FORK_FROM[$i]}"
             fi
 
-            # Line 1: sid, elapsed, model, ctx
+            # Line 1: sid, elapsed, model, ctx, marks
             local meta="${model_short} ${ctx_short}"
             local line1
             if (( i == SELECTED )); then
-                line1=$(printf " ▶ %-8s %-7s %-6s%s" "$sid_short" "$elapsed" "$meta" "$run_mark")
+                line1=$(printf " ▶ %-8s %-7s %s%s" "$sid_short" "$elapsed" "$meta" "$marks")
                 print_at_styled "$row" 2 "$LEFT_WIDTH" "${BOLD}${REV}${FG_WHITE}" "$line1"
             else
-                if [[ -n "$run_mark" ]]; then
-                    line1=$(printf "   %-8s %-7s %-6s%s" "$sid_short" "$elapsed" "$meta" "$run_mark")
+                if [[ "$marks" == *"▸"* ]]; then
+                    line1=$(printf "   %-8s %-7s %s%s" "$sid_short" "$elapsed" "$meta" "$marks")
                     print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_GREEN}" "$line1"
                 else
-                    line1=$(printf "   %-8s %-7s %s" "$sid_short" "$elapsed" "$meta")
+                    line1=$(printf "   %-8s %-7s %s%s" "$sid_short" "$elapsed" "$meta" "$marks")
                     print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_WHITE}" "$line1"
                 fi
             fi
@@ -1040,6 +1117,13 @@ draw_detail_panel() {
     fi
     row=$(( row + 1 ))
 
+    # ── Fork info ──
+    local fork_from="${SESSION_FORK_FROM[$i]}"
+    if [[ -n "$fork_from" ]]; then
+        print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Fork      ${RESET}${FG_YELLOW}⑂ from $fork_from"
+        row=$(( row + 1 ))
+    fi
+
     # ── Model & Context ──
     local model_display
     model_display=$(format_model_short "$model")
@@ -1047,8 +1131,15 @@ draw_detail_panel() {
     ctx_display=$(format_tokens "$ctx")
     print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Model     ${RESET}${FG_WHITE}$model_display"
     row=$(( row + 1 ))
-    print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Context   ${RESET}${FG_WHITE}${ctx_display} tokens"
-    row=$(( row + 1 ))
+    if (( ctx > CTX_WARN_THRESHOLD )); then
+        print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Context   ${RESET}${FG_YELLOW}${ctx_display} tokens ⚠"
+        row=$(( row + 1 ))
+        print_at_styled "$row" "$col" "$width" "${FG_YELLOW}" "            Run /compact in session or press f to fork"
+        row=$(( row + 1 ))
+    else
+        print_at_styled "$row" "$col" "$width" "${FG_CYAN}" "  Context   ${RESET}${FG_WHITE}${ctx_display} tokens"
+        row=$(( row + 1 ))
+    fi
 
     # ── Detail (lazy loaded) ──
     if [[ -n "$DETAIL_MSG_COUNT" ]]; then
@@ -1106,7 +1197,7 @@ draw_status_bar() {
         local bar_text=" ↑↓ Navigate  Enter: Open  Esc: Clear search  /: New search  r: Refresh"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     else
-        local bar_text=" ↑↓ Navigate  Enter: Open  Tab: Next window  q: Quit  Q: Quit all  /: Search  r: Refresh"
+        local bar_text=" ↑↓ Navigate  Enter: Open  f: Fork  Tab: Next window  q: Quit  Q: Quit all  /: Search  r: Refresh"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     fi
 }
@@ -1239,6 +1330,11 @@ handle_input() {
             # Switch to next tmux window
             if [[ -n "${TMUX:-}" ]]; then
                 tmux next-window 2>/dev/null || true
+            fi
+            ;;
+        f)
+            if (( SESSION_COUNT > 0 )); then
+                fork_session "$SELECTED"
             fi
             ;;
         q)

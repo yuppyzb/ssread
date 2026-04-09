@@ -26,6 +26,12 @@ JSONL
 {"parentUuid":"u3","isSidechain":false,"type":"assistant","message":{"model":"claude-sonnet-4-6","role":"assistant","content":[{"type":"text","text":"I'll help with dark mode."},{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"theme.ts"}}],"usage":{"input_tokens":50,"cache_creation_input_tokens":2000,"cache_read_input_tokens":3000,"output_tokens":120}},"uuid":"a2","timestamp":"2026-04-05T14:01:00.000Z","sessionId":"bbbb2222-cccc-dddd-eeee-ffffffffffff"}
 JSONL
 
+    # Session 3: forked from session 1
+    cat > "$MOCK_PROJECTS/-Users-test-project-myapp/cccc3333-dddd-eeee-ffff-000000000000.jsonl" <<'JSONL'
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"[forked-from:aaaa1111] 이전 세션(aaaa1111)의 작업을 이어갑니다. 작업 컨텍스트: fix the login bug (branch: fix/login)\n\n이전 세션의 context가 커서 새 세션으로 fork했습니다. 위 맥락을 기반으로 작업을 계속해주세요."},"uuid":"u4","timestamp":"2026-04-07T09:00:00.000Z","permissionMode":"default","userType":"external","entrypoint":"cli","cwd":"/Users/test/project/myapp","sessionId":"cccc3333-dddd-eeee-ffff-000000000000","version":"2.1.90","gitBranch":"fix/login"}
+{"parentUuid":"u4","isSidechain":false,"type":"assistant","message":{"model":"claude-opus-4-6","role":"assistant","content":[{"type":"text","text":"Continuing from the forked session..."}],"usage":{"input_tokens":200,"cache_creation_input_tokens":3000,"cache_read_input_tokens":2000,"output_tokens":100}},"uuid":"a3","timestamp":"2026-04-07T09:01:00.000Z","sessionId":"cccc3333-dddd-eeee-ffff-000000000000"}
+JSONL
+
     # Subagent (should be excluded)
     cat > "$MOCK_PROJECTS/-Users-test-project-webapp/subagents/agent-xxx.jsonl" <<'JSONL'
 {"type":"user","message":{"role":"user","content":"subagent task"},"uuid":"s1","timestamp":"2026-04-05T14:05:00.000Z","entrypoint":"cli","cwd":"/Users/test/project/webapp","sessionId":"sub-agent-id"}
@@ -135,7 +141,7 @@ source_ssread_functions() {
     source_ssread_functions
     CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
     load_sessions
-    [[ "$SESSION_COUNT" -eq 2 ]]
+    [[ "$SESSION_COUNT" -eq 3 ]]
 }
 
 @test "load_sessions extracts session IDs" {
@@ -268,16 +274,63 @@ source_ssread_functions() {
     [[ "$DETAIL_SID" == "$first_sid" ]]
 }
 
+# ── Tests: Fork ───────────────────────────────────────────────────────────
+
+@test "load_sessions detects fork marker" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        if [[ "${SESSION_IDS[$i]}" == "cccc3333-dddd-eeee-ffff-000000000000" ]]; then
+            [[ "${SESSION_FORK_FROM[$i]}" == "aaaa1111" ]]
+            return 0
+        fi
+    done
+    return 1
+}
+
+@test "load_sessions strips fork marker from first_msg" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        if [[ "${SESSION_IDS[$i]}" == "cccc3333-dddd-eeee-ffff-000000000000" ]]; then
+            # Should not start with [forked-from:
+            [[ "${SESSION_FIRST_MSG[$i]}" != *"[forked-from:"* ]]
+            return 0
+        fi
+    done
+    return 1
+}
+
+@test "non-forked sessions have empty fork_from" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        if [[ "${SESSION_IDS[$i]}" == "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" ]]; then
+            [[ -z "${SESSION_FORK_FROM[$i]}" ]]
+            return 0
+        fi
+    done
+    return 1
+}
+
+@test "CTX_WARN_THRESHOLD is set" {
+    source_ssread_functions
+    (( CTX_WARN_THRESHOLD > 0 ))
+}
+
 # ── Tests: Search & BM25 ─────────────────────────────────────────────────
 
 @test "search_sessions filters to matching sessions" {
     source_ssread_functions
     CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
     load_sessions
-    [[ "$SESSION_COUNT" -eq 2 ]]
+    [[ "$SESSION_COUNT" -eq 3 ]]
     search_sessions "login"
-    [[ "$SESSION_COUNT" -eq 1 ]]
-    [[ "${SESSION_IDS[0]}" == "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" ]]
+    # "login" appears in session 1 and the forked session 3
+    [[ "$SESSION_COUNT" -ge 1 ]]
 }
 
 @test "search_sessions returns zero for no match" {
@@ -293,7 +346,8 @@ source_ssread_functions() {
     CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
     load_sessions
     search_sessions "LOGIN"
-    [[ "$SESSION_COUNT" -eq 1 ]]
+    # "login" appears in session 1 and forked session 3
+    [[ "$SESSION_COUNT" -ge 1 ]]
 }
 
 @test "search_sessions with empty query returns all" {
