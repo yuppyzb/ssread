@@ -953,8 +953,14 @@ fork_session() {
     local prompt_file="/tmp/ssread_fork_$$_$(date +%s)"
     printf '%s' "$fork_prompt" > "$prompt_file"
 
-    tmux new-window -t "$TMUX_SESSION_NAME" -n "f:${parent_sid_short}" \
-        "${cd_cmd}claude \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
+    pane_detach_current
+    local win_name="s:f${parent_sid_short}"
+    tmux new-window -d -t "$TMUX_SESSION_NAME" -n "$win_name" \
+        "${cd_cmd}claude \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'; echo ''; echo 'Session ended. Press any key to close.'; read -rsn1"
+    tmux set-option -t "$TMUX_SESSION_NAME:$win_name" monitor-silence 15 2>/dev/null || true
+    tmux join-pane -h -s "$TMUX_SESSION_NAME:$win_name" -t "$TMUX_SESSION_NAME:list.0" -l 60% 2>/dev/null || true
+    ATTACHED_SID="fork:${parent_sid_short}"
+    tmux select-pane -t "$TMUX_SESSION_NAME:list.1" 2>/dev/null || true
 }
 
 # ── Command Mode ───────────────────────────────────────────────────────────
@@ -1057,8 +1063,14 @@ cmd_new_session() {
         tput smcup; tput civis; stty -echo -icanon min 1 time 0
         clear_screen
     else
-        tmux new-window -t "$TMUX_SESSION_NAME" -n "$win_name" \
+        pane_detach_current
+        local pane_win_name="s:${win_name}"
+        tmux new-window -d -t "$TMUX_SESSION_NAME" -n "$pane_win_name" \
             "${cd_cmd}${branch_cmd}${claude_cmd}; echo ''; echo 'Session ended. Press any key to close.'; read -rsn1"
+        tmux set-option -t "$TMUX_SESSION_NAME:$pane_win_name" monitor-silence 15 2>/dev/null || true
+        tmux join-pane -h -s "$TMUX_SESSION_NAME:$pane_win_name" -t "$TMUX_SESSION_NAME:list.0" -l 60% 2>/dev/null || true
+        ATTACHED_SID="new:${win_name}"
+        tmux select-pane -t "$TMUX_SESSION_NAME:list.1" 2>/dev/null || true
     fi
 
     # Refresh session list after short delay for the new session to register
