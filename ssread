@@ -195,8 +195,10 @@ cleanup() {
 }
 
 get_dimensions() {
-    TERM_ROWS=$(tput lines)
-    TERM_COLS=$(tput cols)
+    local size
+    size=$(stty size 2>/dev/null) || size="$(tput lines) $(tput cols)"
+    TERM_ROWS="${size%% *}"
+    TERM_COLS="${size##* }"
     LEFT_WIDTH=$(( TERM_COLS * 45 / 100 ))
     RIGHT_WIDTH=$(( TERM_COLS - LEFT_WIDTH - 1 ))
 }
@@ -230,7 +232,7 @@ print_at_styled() {
 }
 
 # ── Time Helpers ───────────────────────────────────────────────────────────
-now_epoch() { date +%s; }
+now_epoch() { echo "${EPOCHSECONDS:-$(date +%s)}"; }
 
 iso_to_epoch() {
     local ts="$1"
@@ -883,7 +885,7 @@ fork_session() {
 # ── Command Mode ───────────────────────────────────────────────────────────
 set_status_msg() {
     STATUS_MSG="$1"
-    STATUS_MSG_EXPIRE=$(( $(now_epoch) + 3 ))
+    STATUS_MSG_EXPIRE=$(( ${EPOCHSECONDS:-$(date +%s)} + 3 ))
 }
 
 # Launch a brand-new claude session
@@ -1407,7 +1409,7 @@ draw_status_bar() {
         printf "${REV}${FG_WHITE} :${COMMAND_INPUT}█%-$(( TERM_COLS - ${#COMMAND_INPUT} - 3 ))s${RESET}" " Enter: Run  Esc: Cancel"
     elif $SEARCH_MODE; then
         printf "${REV}${FG_WHITE} /${SEARCH_QUERY}█%-$(( TERM_COLS - ${#SEARCH_QUERY} - 3 ))s${RESET}" " Enter: Search  Esc: Cancel"
-    elif [[ -n "$STATUS_MSG" ]] && (( $(now_epoch) < STATUS_MSG_EXPIRE )); then
+    elif [[ -n "$STATUS_MSG" ]] && (( ${EPOCHSECONDS:-$(date +%s)} < STATUS_MSG_EXPIRE )); then
         if [[ "$STATUS_MSG" == Error:* ]]; then
             printf "${BG_DARK}${FG_YELLOW}%-${TERM_COLS}s${RESET}" " $STATUS_MSG"
         else
