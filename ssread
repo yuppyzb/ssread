@@ -308,9 +308,18 @@ restore_tmux_keybindings() {
 cleanup() {
     restore_tmux_keybindings
     rm -f "$DETAIL_FILE" 2>/dev/null || true
-    # Kill detail watcher and placeholder/session panes
-    tmux kill-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
-    tmux kill-pane -t "$TMUX_SESSION_NAME:list.1" 2>/dev/null || true
+    if [[ -n "${TMUX:-}" && -n "$TMUX_SESSION_NAME" ]]; then
+        # Kill detail watcher and placeholder/session panes
+        tmux kill-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
+        tmux kill-pane -t "$TMUX_SESSION_NAME:list.1" 2>/dev/null || true
+        # Kill all hidden session windows (s:*)
+        tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_index} #{window_name}' 2>/dev/null \
+            | while IFS=' ' read -r idx name; do
+                if [[ "$name" == s:* ]]; then
+                    tmux kill-window -t "$TMUX_SESSION_NAME:$idx" 2>/dev/null || true
+                fi
+            done
+    fi
     tput rmcup        # restore screen
     tput cnorm        # show cursor
     if [[ -n "$ORIG_STTY" ]]; then
