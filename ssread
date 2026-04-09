@@ -7,6 +7,7 @@ set -euo pipefail
 
 # ── Configuration ──────────────────────────────────────────────────────────
 CLAUDE_PROJECTS_DIR="$HOME/.claude/projects"
+SSREAD_BOOKMARKS_FILE="$HOME/.claude/ssread_bookmarks"
 SSREAD_TMUX_SESSION="ssread"
 SSREAD_INSIDE_TMUX="${SSREAD_INSIDE_TMUX:-}"
 
@@ -165,6 +166,9 @@ write_detail_file() {
             printf " %s  ${FG_GREEN}▸ running${RESET}\n" "$sid"
         else
             printf " %s\n" "$sid"
+        fi
+        if is_bookmarked "$sid"; then
+            printf " ${FG_YELLOW}★ bookmarked${RESET}\n"
         fi
         printf "\n"
         printf " ${FG_CYAN}Project ${RESET}%s\n" "$project"
@@ -485,6 +489,44 @@ extract_project_name() {
     echo "$stripped" | sed 's/--/\/_/g'
 }
 
+# ── Bookmarks ─────────────────────────────────────────────────────────────
+# Bookmarks are stored as session ID prefixes (first 8 chars), one per line.
+BOOKMARKS_STR="|"
+
+load_bookmarks() {
+    BOOKMARKS_STR="|"
+    if [[ -f "$SSREAD_BOOKMARKS_FILE" ]]; then
+        local line
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && BOOKMARKS_STR="${BOOKMARKS_STR}${line}|"
+        done < "$SSREAD_BOOKMARKS_FILE"
+    fi
+}
+
+is_bookmarked() {
+    [[ "$BOOKMARKS_STR" == *"|${1:0:8}|"* ]]
+}
+
+toggle_bookmark() {
+    local sid="$1"
+    local sid_short="${sid:0:8}"
+    if is_bookmarked "$sid"; then
+        # Remove bookmark
+        local new_str="|"
+        local entry
+        while IFS='|' read -r -d '|' entry; do
+            [[ -n "$entry" && "$entry" != "$sid_short" ]] && new_str="${new_str}${entry}|"
+        done <<< "${BOOKMARKS_STR:1}"
+        BOOKMARKS_STR="$new_str"
+    else
+        # Add bookmark
+        BOOKMARKS_STR="${BOOKMARKS_STR}${sid_short}|"
+    fi
+    # Persist to file
+    local entries="${BOOKMARKS_STR//|/$'\n'}"
+    printf '%s' "$entries" | grep -v '^$' > "$SSREAD_BOOKMARKS_FILE" 2>/dev/null || true
+}
+
 load_sessions() {
     SESSION_FILES=()
     SESSION_IDS=()
@@ -694,9 +736,24 @@ group_sessions() {
         return
     fi
 
-    # Collect unique project names in first-seen order (= most-recent-first)
-    local -a seen_projects=()
+    # Phase 1: Collect bookmarked sessions first (★ Bookmarks group)
     local -a order=()  # maps: flat index in new order → original index
+    local bookmark_count=0
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        if is_bookmarked "${SESSION_IDS[$i]}"; then
+            order+=("$i")
+            bookmark_count=$(( bookmark_count + 1 ))
+        fi
+    done
+    if (( bookmark_count > 0 )); then
+        GROUP_NAMES+=("★ Bookmarks")
+        GROUP_STARTS+=(0)
+        GROUP_COUNTS+=("$bookmark_count")
+        GROUP_COUNT=$(( GROUP_COUNT + 1 ))
+    fi
+
+    # Phase 2: Collect unique project names in first-seen order (= most-recent-first)
+    local -a seen_projects=()
     for (( i=0; i<SESSION_COUNT; i++ )); do
         local proj="${SESSION_PROJECTS[$i]}"
         local found=false
@@ -711,20 +768,22 @@ group_sessions() {
         fi
     done
 
-    # Build reordered index: for each project, collect its session indices
+    # Phase 3: Build project groups (non-bookmarked sessions only)
     for proj in "${seen_projects[@]}"; do
         local start=${#order[@]}
         local count=0
         for (( i=0; i<SESSION_COUNT; i++ )); do
-            if [[ "${SESSION_PROJECTS[$i]}" == "$proj" ]]; then
+            if [[ "${SESSION_PROJECTS[$i]}" == "$proj" ]] && ! is_bookmarked "${SESSION_IDS[$i]}"; then
                 order+=("$i")
                 count=$(( count + 1 ))
             fi
         done
-        GROUP_NAMES+=("$proj")
-        GROUP_STARTS+=("$start")
-        GROUP_COUNTS+=("$count")
-        GROUP_COUNT=$(( GROUP_COUNT + 1 ))
+        if (( count > 0 )); then
+            GROUP_NAMES+=("$proj")
+            GROUP_STARTS+=("$start")
+            GROUP_COUNTS+=("$count")
+            GROUP_COUNT=$(( GROUP_COUNT + 1 ))
+        fi
     done
 
     # Reorder all SESSION_* arrays according to order[]
@@ -1392,6 +1451,9 @@ draw_session_list() {
             if (( ctx_val > CTX_WARN_THRESHOLD )); then
                 marks="${marks} ⚠"
             fi
+            if is_bookmarked "${SESSION_IDS[$i]}"; then
+                marks="${marks} ★"
+            fi
             if [[ -n "${SESSION_FORK_FROM[$i]}" ]]; then
                 marks="${marks} ⑂${SESSION_FORK_FROM[$i]}"
             fi
@@ -1579,7 +1641,7 @@ draw_status_bar() {
         local bar_text=" ↑↓ Navigate  Enter: Open  Esc: Clear search  /: New search  r: Refresh"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     else
-        local bar_text=" j/k Nav  Enter: Attach  ^b0: List  ^bTab: Toggle  Esc: Detach  f: Fork  /: Search  q: Quit"
+        local bar_text=" j/k Nav  Enter: Attach  b: Bookmark  ^b0: List  ^bTab: Toggle  Esc: Detach  /: Search  q: Quit"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     fi
 }
@@ -1768,6 +1830,12 @@ handle_input() {
                 fork_session "$SELECTED"
             fi
             ;;
+        b)
+            if (( SESSION_COUNT > 0 )); then
+                toggle_bookmark "${SESSION_IDS[$SELECTED]}"
+                group_sessions
+            fi
+            ;;
         q)
             exit 0
             ;;
@@ -1859,6 +1927,7 @@ main() {
     setup_terminal
     get_dimensions
     draw_loading
+    load_bookmarks
     load_sessions
     group_sessions
     clear_screen

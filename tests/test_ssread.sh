@@ -416,6 +416,54 @@ source_ssread_functions() {
     [[ "$GROUP_COUNT" -eq 0 ]]
 }
 
+# ── Tests: Bookmarks ─────────────────────────────────────────────────────
+
+@test "is_bookmarked returns false when no bookmarks" {
+    source_ssread_functions
+    BOOKMARKS_STR="|"
+    ! is_bookmarked "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+}
+
+@test "is_bookmarked returns true for bookmarked session" {
+    source_ssread_functions
+    BOOKMARKS_STR="|aaaa1111|"
+    is_bookmarked "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+}
+
+@test "toggle_bookmark adds and removes" {
+    source_ssread_functions
+    SSREAD_BOOKMARKS_FILE="$TEST_DIR/bookmarks"
+    BOOKMARKS_STR="|"
+    toggle_bookmark "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+    is_bookmarked "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+    toggle_bookmark "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+    ! is_bookmarked "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+}
+
+@test "toggle_bookmark persists to file" {
+    source_ssread_functions
+    SSREAD_BOOKMARKS_FILE="$TEST_DIR/bookmarks"
+    BOOKMARKS_STR="|"
+    toggle_bookmark "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+    [[ -f "$TEST_DIR/bookmarks" ]]
+    grep -q "aaaa1111" "$TEST_DIR/bookmarks"
+}
+
+@test "bookmarked sessions appear in first group" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    SSREAD_BOOKMARKS_FILE="$TEST_DIR/bookmarks"
+    BOOKMARKS_STR="|"
+    load_sessions
+    # Bookmark the last session (least recent)
+    local last_idx=$(( SESSION_COUNT - 1 ))
+    toggle_bookmark "${SESSION_IDS[$last_idx]}"
+    group_sessions
+    # First group should be bookmarks
+    [[ "${GROUP_NAMES[0]}" == "★ Bookmarks" ]]
+    [[ "${GROUP_COUNTS[0]}" -eq 1 ]]
+}
+
 # ── Tests: tmux helpers (without actual tmux) ─────────────────────────────
 
 @test "is_session_active returns false when no windows active" {
