@@ -161,7 +161,7 @@ write_detail_file() {
         if [[ "$ATTACHED_SID" == "$sid" ]]; then
             printf " %s  ${FG_GREEN}◀ attached${RESET}\n" "$sid"
         elif is_session_needs_attention "$sid"; then
-            printf " %s  ${FG_YELLOW}🔔 needs input${RESET}\n" "$sid"
+            printf " %s  ${FG_YELLOW}! needs input${RESET}\n" "$sid"
         elif is_session_active "$sid"; then
             printf " %s  ${FG_GREEN}▸ running${RESET}\n" "$sid"
         else
@@ -355,7 +355,12 @@ print_at() {
     shift 3
     local text="$*"
     move_to "$row" "$col"
-    printf "%-${max_width}.${max_width}s" "$text"
+    # Use char-based truncation (bash ${:0:N} counts chars, not bytes)
+    # to avoid cutting multi-byte UTF-8 characters mid-sequence
+    local truncated="${text:0:$max_width}"
+    local pad=$(( max_width - ${#truncated} ))
+    (( pad < 0 )) && pad=0
+    printf "%s%*s" "$truncated" "$pad" ""
 }
 
 print_at_styled() {
@@ -363,7 +368,10 @@ print_at_styled() {
     shift 4
     local text="$*"
     move_to "$row" "$col"
-    printf "${style}%-${max_width}.${max_width}s${RESET}" "$text"
+    local truncated="${text:0:$max_width}"
+    local pad=$(( max_width - ${#truncated} ))
+    (( pad < 0 )) && pad=0
+    printf "${style}%s%*s${RESET}" "$truncated" "$pad" ""
 }
 
 # ── Time Helpers ───────────────────────────────────────────────────────────
@@ -1452,7 +1460,7 @@ draw_session_list() {
             if [[ "$ATTACHED_SID" == "${SESSION_IDS[$i]}" ]]; then
                 marks="${marks} ◀"
             elif is_session_needs_attention "${SESSION_IDS[$i]}"; then
-                marks="${marks} 🔔"
+                marks="${marks} !"
             elif is_session_active "${SESSION_IDS[$i]}"; then
                 marks="${marks} ▸"
             fi
@@ -1535,7 +1543,7 @@ draw_detail_panel() {
     if [[ "$ATTACHED_SID" == "$sid" ]]; then
         print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_GREEN}◀ attached"
     elif is_session_needs_attention "$sid"; then
-        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_YELLOW}🔔 needs input"
+        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_YELLOW}! needs input"
     elif is_session_active "$sid"; then
         print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_GREEN}▸ running"
     else
