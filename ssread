@@ -290,6 +290,11 @@ SEARCH_QUERY=""
 SEARCH_MODE=false
 SEARCH_ACTIVE=""
 
+COMMAND_MODE=false
+COMMAND_INPUT=""
+STATUS_MSG=""
+STATUS_MSG_EXPIRE=0
+
 # Detail-level fields (lazy loaded for one session at a time)
 DETAIL_SID=""         # which session is currently loaded
 DETAIL_LAST_MSG=""
@@ -847,6 +852,163 @@ fork_session() {
         "${cd_cmd}claude \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
 }
 
+# ── Command Mode ───────────────────────────────────────────────────────────
+set_status_msg() {
+    STATUS_MSG="$1"
+    STATUS_MSG_EXPIRE=$(( $(now_epoch) + 3 ))
+}
+
+# Launch a brand-new claude session
+cmd_new_session() {
+    local root="" prompt="" branch=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --root|-r)
+                if [[ -z "${2:-}" ]]; then
+                    set_status_msg "Error: --root requires a path"
+                    return 1
+                fi
+                root="$2"; shift 2 ;;
+            --prompt|-p)
+                if [[ -z "${2:-}" ]]; then
+                    set_status_msg "Error: --prompt requires a value"
+                    return 1
+                fi
+                prompt="$2"; shift 2 ;;
+            --branch|-b)
+                if [[ -z "${2:-}" ]]; then
+                    set_status_msg "Error: --branch requires a value"
+                    return 1
+                fi
+                branch="$2"; shift 2 ;;
+            *)
+                set_status_msg "Error: unknown option: $1"
+                return 1 ;;
+        esac
+    done
+
+    # Validate root
+    if [[ -z "$root" ]]; then
+        set_status_msg "Error: --root is required"
+        return 1
+    fi
+
+    # Expand ~ manually
+    if [[ "$root" == "~"* ]]; then
+        root="${HOME}${root:1}"
+    fi
+
+    if [[ ! -d "$root" ]]; then
+        set_status_msg "Error: directory not found: $root"
+        return 1
+    fi
+
+    # Validate branch
+    if [[ -n "$branch" ]]; then
+        if [[ ! -d "$root/.git" ]] && ! git -C "$root" rev-parse --git-dir &>/dev/null; then
+            set_status_msg "Error: not a git repository: $root"
+            return 1
+        fi
+        if ! git -C "$root" rev-parse --verify "$branch" &>/dev/null; then
+            set_status_msg "Error: branch not found: $branch"
+            return 1
+        fi
+    fi
+
+    # Build command
+    local cd_cmd="cd $(printf '%q' "$root") && "
+    local branch_cmd=""
+    if [[ -n "$branch" ]]; then
+        branch_cmd="git checkout $(printf '%q' "$branch") && "
+    fi
+
+    local claude_cmd="claude"
+    if [[ -n "$prompt" ]]; then
+        local prompt_file="/tmp/ssread_new_$$_$(date +%s)"
+        printf '%s' "$prompt" > "$prompt_file"
+        claude_cmd="claude \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
+    fi
+
+    local win_name="new"
+    if [[ -n "$branch" ]]; then
+        win_name="${branch:0:16}"
+    fi
+
+    if [[ -z "${TMUX:-}" ]]; then
+        tput rmcup; tput cnorm
+        if [[ -n "$ORIG_STTY" ]]; then stty "$ORIG_STTY" 2>/dev/null || true; fi
+        clear_screen
+        cd "$root"
+        if [[ -n "$branch" ]]; then git checkout "$branch"; fi
+        set +e
+        if [[ -n "$prompt" ]]; then
+            claude "$prompt"
+        else
+            claude
+        fi
+        set -e
+        tput smcup; tput civis; stty -echo -icanon min 1 time 0
+        clear_screen
+    else
+        tmux new-window -t "$TMUX_SESSION_NAME" -n "$win_name" \
+            "${cd_cmd}${branch_cmd}${claude_cmd}; echo ''; echo 'Session ended. Press any key to close.'; read -rsn1"
+    fi
+
+    # Refresh session list after short delay for the new session to register
+    set_status_msg "New session launched in $root"
+    load_sessions
+    group_sessions
+}
+
+execute_command() {
+    local input="$1"
+
+    # Tokenize respecting quoted strings
+    local -a tokens=()
+    local token="" in_quote="" quote_char=""
+    local i=0
+    while (( i < ${#input} )); do
+        local ch="${input:$i:1}"
+        if [[ -n "$in_quote" ]]; then
+            if [[ "$ch" == "$quote_char" ]]; then
+                in_quote=""
+            else
+                token+="$ch"
+            fi
+        elif [[ "$ch" == '"' || "$ch" == "'" ]]; then
+            in_quote=1
+            quote_char="$ch"
+        elif [[ "$ch" == " " ]]; then
+            if [[ -n "$token" ]]; then
+                tokens+=("$token")
+                token=""
+            fi
+        else
+            token+="$ch"
+        fi
+        (( i++ ))
+    done
+    [[ -n "$token" ]] && tokens+=("$token")
+
+    if [[ ${#tokens[@]} -eq 0 ]]; then
+        return
+    fi
+
+    local cmd="${tokens[0]}"
+    local args=("${tokens[@]:1}")
+
+    case "$cmd" in
+        new)
+            cmd_new_session "${args[@]+"${args[@]}"}"
+            ;;
+        *)
+            set_status_msg "Unknown command: $cmd"
+            ;;
+    esac
+}
+
 # ── Session Launch (fallback for non-tmux) ─────────────────────────────────
 launch_session_direct() {
     local sid="$1"
@@ -1191,13 +1353,21 @@ draw_detail_panel() {
 draw_status_bar() {
     local bar_row=$TERM_ROWS
     move_to "$bar_row" 1
-    if $SEARCH_MODE; then
+    if $COMMAND_MODE; then
+        printf "${REV}${FG_WHITE} :${COMMAND_INPUT}█%-$(( TERM_COLS - ${#COMMAND_INPUT} - 3 ))s${RESET}" " Enter: Run  Esc: Cancel"
+    elif $SEARCH_MODE; then
         printf "${REV}${FG_WHITE} /${SEARCH_QUERY}█%-$(( TERM_COLS - ${#SEARCH_QUERY} - 3 ))s${RESET}" " Enter: Search  Esc: Cancel"
+    elif [[ -n "$STATUS_MSG" ]] && (( $(now_epoch) < STATUS_MSG_EXPIRE )); then
+        if [[ "$STATUS_MSG" == Error:* ]]; then
+            printf "${BG_DARK}${FG_YELLOW}%-${TERM_COLS}s${RESET}" " $STATUS_MSG"
+        else
+            printf "${BG_DARK}${FG_GREEN}%-${TERM_COLS}s${RESET}" " $STATUS_MSG"
+        fi
     elif [[ -n "$SEARCH_ACTIVE" ]]; then
         local bar_text=" ↑↓ Navigate  Enter: Open  Esc: Clear search  /: New search  r: Refresh"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     else
-        local bar_text=" ↑↓ Navigate  Enter: Open  f: Fork  Tab: Next window  q: Quit  Q: Quit all  /: Search  r: Refresh"
+        local bar_text=" ↑↓ Navigate  Enter: Open  f: Fork  :: Command  /: Search  q: Quit  r: Refresh"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     fi
 }
@@ -1289,8 +1459,37 @@ handle_search_input() {
     esac
 }
 
+handle_command_input() {
+    case "$_KEY" in
+        ENTER)
+            COMMAND_MODE=false
+            if [[ -n "$COMMAND_INPUT" ]]; then
+                execute_command "$COMMAND_INPUT"
+            fi
+            COMMAND_INPUT=""
+            ;;
+        ESC)
+            COMMAND_MODE=false
+            COMMAND_INPUT=""
+            ;;
+        $'\x7f'|$'\b')
+            COMMAND_INPUT="${COMMAND_INPUT%?}"
+            ;;
+        *)
+            if [[ ${#_KEY} -eq 1 ]] && [[ "$_KEY" =~ [[:print:]] ]]; then
+                COMMAND_INPUT="${COMMAND_INPUT}${_KEY}"
+            fi
+            ;;
+    esac
+}
+
 handle_input() {
     read_key
+
+    if $COMMAND_MODE; then
+        handle_command_input
+        return
+    fi
 
     if $SEARCH_MODE; then
         handle_search_input
@@ -1348,6 +1547,10 @@ handle_input() {
         /)
             SEARCH_MODE=true
             SEARCH_QUERY=""
+            ;;
+        :)
+            COMMAND_MODE=true
+            COMMAND_INPUT=""
             ;;
         ESC)
             if [[ -n "$SEARCH_ACTIVE" ]]; then

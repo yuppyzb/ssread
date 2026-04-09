@@ -465,3 +465,110 @@ source_ssread_functions() {
     SSREAD_INSIDE_TMUX=1
     ensure_tmux_session
 }
+
+# ── Tests: Command Mode ──────────────────────────────────────────────────
+
+@test "COMMAND_MODE initializes to false" {
+    source_ssread_functions
+    [[ "$COMMAND_MODE" == "false" ]]
+}
+
+@test "set_status_msg sets message and expiration" {
+    source_ssread_functions
+    set_status_msg "hello"
+    [[ "$STATUS_MSG" == "hello" ]]
+    (( STATUS_MSG_EXPIRE > 0 ))
+}
+
+@test "execute_command recognizes unknown command" {
+    source_ssread_functions
+    execute_command "foobar"
+    [[ "$STATUS_MSG" == "Unknown command: foobar" ]]
+}
+
+@test "execute_command empty input does nothing" {
+    source_ssread_functions
+    STATUS_MSG=""
+    execute_command ""
+    [[ -z "$STATUS_MSG" ]]
+}
+
+@test "cmd_new_session fails without --root" {
+    source_ssread_functions
+    cmd_new_session || true
+    [[ "$STATUS_MSG" == "Error: --root is required" ]]
+}
+
+@test "cmd_new_session fails with nonexistent directory" {
+    source_ssread_functions
+    cmd_new_session --root "/tmp/ssread_nonexistent_$$" || true
+    [[ "$STATUS_MSG" == *"directory not found"* ]]
+}
+
+@test "cmd_new_session fails with unknown option" {
+    source_ssread_functions
+    cmd_new_session --foo bar || true
+    [[ "$STATUS_MSG" == *"unknown option"* ]]
+}
+
+@test "cmd_new_session validates branch requires git repo" {
+    source_ssread_functions
+    local tmpdir="$TEST_DIR/nogit"
+    mkdir -p "$tmpdir"
+    cmd_new_session --root "$tmpdir" --branch "main" || true
+    [[ "$STATUS_MSG" == *"not a git repository"* ]]
+}
+
+@test "cmd_new_session validates branch existence" {
+    source_ssread_functions
+    local tmpdir="$TEST_DIR/gitrepo"
+    mkdir -p "$tmpdir"
+    git -C "$tmpdir" init -q
+    git -C "$tmpdir" commit --allow-empty -m "init" -q
+    cmd_new_session --root "$tmpdir" --branch "nonexistent" || true
+    [[ "$STATUS_MSG" == *"branch not found"* ]]
+}
+
+@test "execute_command parses new with quoted prompt" {
+    source_ssread_functions
+    # We can't actually launch claude in tests, so just verify parsing
+    # by checking that a valid root passes validation
+    local tmpdir="$TEST_DIR/validroot"
+    mkdir -p "$tmpdir"
+    # This will fail at tmux launch (no tmux in test), but should pass validation
+    unset TMUX 2>/dev/null || true
+    # Stub claude command
+    claude() { echo "stub"; }
+    export -f claude 2>/dev/null || true
+    # Run in subshell so tput/stty failures don't break test
+    ORIG_STTY=""
+    # Just test the parsing — cmd_new_session with valid root should not produce an error status
+    STATUS_MSG=""
+    cmd_new_session --root "$tmpdir" 2>/dev/null || true
+    [[ "$STATUS_MSG" != Error:* ]]
+}
+
+@test "execute_command parses quoted strings correctly" {
+    source_ssread_functions
+    local tmpdir="$TEST_DIR/quotedtest"
+    mkdir -p "$tmpdir"
+    unset TMUX 2>/dev/null || true
+    claude() { echo "stub"; }
+    export -f claude 2>/dev/null || true
+    ORIG_STTY=""
+    STATUS_MSG=""
+    execute_command "new --root '$tmpdir' --prompt 'hello world'" 2>/dev/null || true
+    [[ "$STATUS_MSG" != Error:* ]]
+}
+
+@test "cmd_new_session expands tilde in root" {
+    source_ssread_functions
+    # ~ should expand to $HOME; if $HOME exists, validation passes
+    unset TMUX 2>/dev/null || true
+    claude() { echo "stub"; }
+    export -f claude 2>/dev/null || true
+    ORIG_STTY=""
+    STATUS_MSG=""
+    cmd_new_session --root "~" 2>/dev/null || true
+    [[ "$STATUS_MSG" != *"directory not found"* ]]
+}
