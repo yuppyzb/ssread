@@ -279,6 +279,9 @@ pane_attach_session() {
     tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:s:$sid_short.0" 2>/dev/null || true
     ATTACHED_SID="$sid"
 
+    # Clear ● indicator — user is reviewing this session
+    SEEN_WORKING_STR="${SEEN_WORKING_STR/"|${sid_short}|"/"|"}"
+
     # Force refresh so indicators update immediately
     ACTIVE_WINDOWS_LAST_REFRESH=0
 
@@ -601,7 +604,8 @@ GROUP_COUNT=0
 #   anything else (sleep/bash) → session is done (show ●)
 ACTIVE_WINDOWS_STR="|"    # all s:* windows
 ACTIVE_WINDOWS_COUNT=0
-WORKING_WINDOWS_STR="|"   # windows where claude is actively running
+WORKING_WINDOWS_STR="|"   # windows where claude is actively running tools
+SEEN_WORKING_STR="|"      # sessions that have been working at least once (for ● detection)
 ACTIVE_WINDOWS_LAST_REFRESH=0
 
 refresh_active_windows() {
@@ -637,6 +641,10 @@ refresh_active_windows() {
                     has_tools=$(echo "$_ps_out" | awk -v pp="$claude_pid" '$2==pp && $3!="npm" && $3!="node" {found=1; exit} END {print found+0}')
                     if (( has_tools )); then
                         WORKING_WINDOWS_STR="${WORKING_WINDOWS_STR}${sid_part}|"
+                        # Track that this session has been working (for ● on completion)
+                        if [[ "$SEEN_WORKING_STR" != *"|${sid_part}|"* ]]; then
+                            SEEN_WORKING_STR="${SEEN_WORKING_STR}${sid_part}|"
+                        fi
                     fi
                 fi
             fi
@@ -649,9 +657,9 @@ is_session_active() {
     [[ "$ACTIVE_WINDOWS_STR" == *"|${1:0:8}|"* ]]
 }
 
-# Session has a window but claude is NOT running (done/ended)
+# Session was working but now idle (task completed, needs review)
 is_session_done() {
-    is_session_active "$1" && [[ "$WORKING_WINDOWS_STR" != *"|${1:0:8}|"* ]]
+    [[ "$SEEN_WORKING_STR" == *"|${1:0:8}|"* && "$WORKING_WINDOWS_STR" != *"|${1:0:8}|"* ]]
 }
 
 # Session has a window and claude IS running

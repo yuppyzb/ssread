@@ -600,10 +600,11 @@ source_ssread_functions() {
     is_session_working "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 }
 
-@test "is_session_done returns true when active but not working" {
+@test "is_session_done returns true when was working then stopped" {
     source_ssread_functions
     ACTIVE_WINDOWS_STR="|aaaa1111|"
     WORKING_WINDOWS_STR="|"
+    SEEN_WORKING_STR="|aaaa1111|"
     is_session_done "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 }
 
@@ -611,6 +612,15 @@ source_ssread_functions() {
     source_ssread_functions
     ACTIVE_WINDOWS_STR="|aaaa1111|"
     WORKING_WINDOWS_STR="|aaaa1111|"
+    SEEN_WORKING_STR="|aaaa1111|"
+    ! is_session_done "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+}
+
+@test "is_session_done returns false when never worked" {
+    source_ssread_functions
+    ACTIVE_WINDOWS_STR="|aaaa1111|"
+    WORKING_WINDOWS_STR="|"
+    SEEN_WORKING_STR="|"
     ! is_session_done "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 }
 
