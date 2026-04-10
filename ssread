@@ -1715,17 +1715,17 @@ read_key() {
     _KEY=""
     local c="" _read_rc=0
     # Timeout after 2s so we periodically re-render (catches pane resizes, activity updates)
-    IFS= read -rsn1 -t 2 c || _read_rc=$?
+    IFS= read -rsn1 -t 2 c 2>/dev/null || _read_rc=$?
     if (( _read_rc > 0 )) && [[ -z "$c" ]]; then
         # Timeout or signal — return empty key to trigger re-render
         return
     fi
     if [[ "$c" == $'\x1b' ]]; then
         local seq=""
-        IFS= read -rsn1 -t 1 seq || true
+        IFS= read -rsn1 -t 1 seq 2>/dev/null || true
         if [[ "$seq" == "[" ]]; then
             local code=""
-            IFS= read -rsn1 -t 1 code || true
+            IFS= read -rsn1 -t 1 code 2>/dev/null || true
             _KEY="ESC[${code}"
         else
             _KEY="ESC"
