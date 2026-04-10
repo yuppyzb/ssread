@@ -146,10 +146,13 @@ write_detail_file() {
         return
     fi
 
-    local i
-    i=$(selected_session_idx)
+    # Inline selected_session_idx to avoid subshell
+    local i=""
+    if (( SELECTED >= 0 && SELECTED < DISPLAY_COUNT )) && [[ "${DISPLAY_TYPES[$SELECTED]}" == "session" ]]; then
+        i="${DISPLAY_INDICES[$SELECTED]}"
+    fi
     if [[ -z "$i" ]]; then
-        printf ' ${FG_GRAY}No session selected${RESET}\n' > "$DETAIL_FILE"
+        printf '%s\n' " No session selected" > "$DETAIL_FILE"
         return
     fi
 
@@ -162,6 +165,15 @@ write_detail_file() {
     local first_msg="${SESSION_FIRST_MSG[$i]}"
 
     load_session_detail "$i"
+
+    # Inline format_tokens to avoid subshell
+    local out_display="$DETAIL_TOTAL_OUTPUT"
+    if [[ -n "$DETAIL_TOTAL_OUTPUT" ]]; then
+        local _t="$DETAIL_TOTAL_OUTPUT"
+        if (( _t >= 1000000 )); then out_display="$(( _t / 1000000 )).$(( (_t % 1000000) / 100000 ))M"
+        elif (( _t >= 1000 )); then out_display="$(( _t / 1000 ))K"
+        fi
+    fi
 
     {
         printf "${BOLD}${FG_YELLOW} Session${RESET}\n"
@@ -183,8 +195,6 @@ write_detail_file() {
         [[ -n "$cwd" ]] && printf " ${FG_CYAN}CWD     ${RESET}%s\n" "$cwd"
         printf " ${FG_CYAN}Model   ${RESET}%s  %s\n" "$model_short" "$ctx_short"
         if [[ -n "$DETAIL_MSG_COUNT" ]]; then
-            local out_display
-            out_display=$(format_tokens "$DETAIL_TOTAL_OUTPUT")
             printf " ${FG_CYAN}Msgs    ${RESET}%s turns  %s output\n" "$DETAIL_MSG_COUNT" "$out_display"
             printf " ${FG_CYAN}Tools   ${RESET}%s calls (%s)\n" "$DETAIL_TOOL_COUNT" "$DETAIL_TOP_TOOL"
         fi
@@ -594,6 +604,9 @@ refresh_active_windows() {
     ACTIVE_WINDOWS_COUNT=0
     SILENCE_WINDOWS_STR="|"
     if [[ -n "${TMUX:-}" ]]; then
+        # Use here-string instead of process substitution to avoid FD leak in bash 3.2
+        local _tmux_out
+        _tmux_out=$(tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name} #{window_silence_flag}' 2>/dev/null) || true
         local name flag
         while IFS=' ' read -r name flag; do
             if [[ "$name" == s:* ]]; then
@@ -604,7 +617,7 @@ refresh_active_windows() {
                     SILENCE_WINDOWS_STR="${SILENCE_WINDOWS_STR}${sid_part}|"
                 fi
             fi
-        done < <(tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name} #{window_silence_flag}' 2>/dev/null)
+        done <<< "$_tmux_out"
     fi
     ACTIVE_WINDOWS_LAST_REFRESH=$now
 }
