@@ -177,10 +177,8 @@ write_detail_file() {
 
     {
         printf "${BOLD}${FG_YELLOW} Session${RESET}\n"
-        if [[ "$ATTACHED_SID" == "$sid" ]]; then
-            printf " %s  ${FG_GREEN}◀ attached${RESET}\n" "$sid"
-        elif is_session_working "$sid"; then
-            printf " %s  ${FG_GREEN}${SPINNER_CHARS[$SPINNER_IDX]} working${RESET}\n" "$sid"
+        if is_session_working "$sid"; then
+            printf " %s  ${FG_CYAN}${SPINNER_CHARS[$SPINNER_IDX]} working${RESET}\n" "$sid"
         elif is_session_done "$sid"; then
             printf " %s  ${FG_YELLOW}● done${RESET}\n" "$sid"
         else
@@ -515,8 +513,8 @@ STATUS_MSG=""
 STATUS_MSG_EXPIRE=0
 REFRESH_AFTER_CYCLES=0  # auto-reload sessions after N render cycles
 
-# Loading animation for working sessions (cycles each render = every ~1s)
-SPINNER_CHARS=( ".  " ".. " "..." )
+# Braille spinner for working sessions (cycles each render = every ~1s)
+SPINNER_CHARS=( "⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏" )
 SPINNER_IDX=0
 
 # ── Display List (flat view of the tree) ──────────────────────────────────
@@ -1642,15 +1640,19 @@ draw_session_list() {
             local ctx_short="${SESSION_CTX_SHORT[$i]}"
             local first_msg="${SESSION_FIRST_MSG[$i]}"
 
-            # Status indicators
-            local marks=""
-            if [[ "$ATTACHED_SID" == "${SESSION_IDS[$i]}" ]]; then
-                marks="${marks} ◀"
-            elif is_session_working "${SESSION_IDS[$i]}"; then
-                marks="${marks} ${SPINNER_CHARS[$SPINNER_IDX]}"
+            # Status prefix (shown at the front of the line)
+            local prefix="  "
+            local prefix_style=""
+            if is_session_working "${SESSION_IDS[$i]}"; then
+                prefix="${SPINNER_CHARS[$SPINNER_IDX]} "
+                prefix_style="${FG_CYAN}"
             elif is_session_done "${SESSION_IDS[$i]}"; then
-                marks="${marks} ●"
+                prefix="● "
+                prefix_style="${FG_YELLOW}"
             fi
+
+            # Trailing marks (context warning, bookmark, fork)
+            local marks=""
             local ctx_val="${SESSION_CTX[$i]}"
             if (( ctx_val > CTX_WARN_THRESHOLD )); then
                 marks="${marks} ⚠"
@@ -1662,18 +1664,19 @@ draw_session_list() {
                 marks="${marks} ⑂${SESSION_FORK_FROM[$i]}"
             fi
 
-            # Line 1: sid, elapsed, model, ctx, marks
+            # Line 1: [status] sid elapsed model ctx [marks]
             local meta="${model_short} ${ctx_short}"
             local line1
             if (( d == SELECTED )); then
-                line1=$(printf " ▶ %-8s %-7s %s%s" "$sid_short" "$elapsed" "$meta" "$marks")
+                line1=$(printf " %s%-8s %-7s %s%s" "$prefix" "$sid_short" "$elapsed" "$meta" "$marks")
                 print_at_styled "$row" 2 "$LEFT_WIDTH" "${BOLD}${REV}${FG_WHITE}" "$line1"
             else
-                if is_session_active "${SESSION_IDS[$i]}"; then
-                    line1=$(printf "   %-8s %-7s %s%s" "$sid_short" "$elapsed" "$meta" "$marks")
+                line1=$(printf " %s%-8s %-7s %s%s" "$prefix" "$sid_short" "$elapsed" "$meta" "$marks")
+                if [[ -n "$prefix_style" ]]; then
+                    print_at_styled "$row" 2 "$LEFT_WIDTH" "$prefix_style" "$line1"
+                elif is_session_active "${SESSION_IDS[$i]}"; then
                     print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_GREEN}" "$line1"
                 else
-                    line1=$(printf "   %-8s %-7s %s%s" "$sid_short" "$elapsed" "$meta" "$marks")
                     print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_WHITE}" "$line1"
                 fi
             fi
@@ -1728,10 +1731,8 @@ draw_detail_panel() {
     # ── Header ──
     print_at_styled "$row" "$col" "$width" "${BOLD}${FG_YELLOW}" "  Session"
     row=$(( row + 1 ))
-    if [[ "$ATTACHED_SID" == "$sid" ]]; then
-        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_GREEN}◀ attached"
-    elif is_session_working "$sid"; then
-        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_GREEN}${SPINNER_CHARS[$SPINNER_IDX]} working"
+    if is_session_working "$sid"; then
+        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_CYAN}${SPINNER_CHARS[$SPINNER_IDX]} working"
     elif is_session_done "$sid"; then
         print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_YELLOW}● done"
     else
@@ -1864,7 +1865,7 @@ PREV_RIGHT_WIDTH=-1
 render() {
     get_dimensions
     refresh_active_windows
-    SPINNER_IDX=$(( (SPINNER_IDX + 1) % 3 ))
+    SPINNER_IDX=$(( (SPINNER_IDX + 1) % 10 ))
     # Deferred auto-refresh: reload sessions after new/fork creates a session
     if (( REFRESH_AFTER_CYCLES > 0 )); then
         REFRESH_AFTER_CYCLES=$(( REFRESH_AFTER_CYCLES - 1 ))
