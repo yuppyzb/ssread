@@ -321,6 +321,54 @@ source_ssread_functions() {
     (( CTX_WARN_THRESHOLD > 0 ))
 }
 
+@test "fork_session uses claude --resume --fork-session (non-tmux)" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    unset TMUX 2>/dev/null || true
+
+    # Capture the claude command invocation
+    local claude_args=""
+    claude() { claude_args="$*"; }
+    export -f claude 2>/dev/null || true
+    ORIG_STTY=""
+
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        if [[ "${SESSION_IDS[$i]}" == "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" ]]; then
+            fork_session "$i" 2>/dev/null || true
+            # Must use --resume with full session ID and --fork-session
+            [[ "$claude_args" == *"--resume"* ]]
+            [[ "$claude_args" == *"--fork-session"* ]]
+            [[ "$claude_args" == *"aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"* ]]
+            return 0
+        fi
+    done
+    return 1
+}
+
+@test "fork_session does not pass custom fork prompt" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    unset TMUX 2>/dev/null || true
+
+    local claude_args=""
+    claude() { claude_args="$*"; }
+    export -f claude 2>/dev/null || true
+    ORIG_STTY=""
+
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        if [[ "${SESSION_IDS[$i]}" == "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" ]]; then
+            fork_session "$i" 2>/dev/null || true
+            # Must NOT contain the old custom fork prompt
+            [[ "$claude_args" != *"forked-from"* ]]
+            [[ "$claude_args" != *"작업 컨텍스트"* ]]
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ── Tests: Search & BM25 ─────────────────────────────────────────────────
 
 @test "search_sessions filters to matching sessions" {

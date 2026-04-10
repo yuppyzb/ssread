@@ -1257,17 +1257,6 @@ fork_session() {
     local parent_sid="${SESSION_IDS[$idx]}"
     local parent_sid_short="${parent_sid:0:8}"
     local cwd="${SESSION_CWDS[$idx]}"
-    local first_msg="${SESSION_FIRST_MSG[$idx]}"
-    local branch="${SESSION_BRANCHES[$idx]}"
-
-    # Build fork prompt
-    local fork_prompt="[forked-from:${parent_sid_short}] 이전 세션(${parent_sid_short})의 작업을 이어갑니다. 작업 컨텍스트: ${first_msg}"
-    if [[ -n "$branch" ]]; then
-        fork_prompt="${fork_prompt} (branch: ${branch})"
-    fi
-    fork_prompt="${fork_prompt}
-
-이전 세션의 context가 커서 새 세션으로 fork했습니다. 위 맥락을 기반으로 작업을 계속해주세요."
 
     local cd_cmd=""
     if [[ -n "$cwd" && -d "$cwd" ]]; then
@@ -1281,21 +1270,17 @@ fork_session() {
         clear_screen
         if [[ -n "$cwd" && -d "$cwd" ]]; then cd "$cwd"; fi
         set +e
-        claude "$fork_prompt"
+        claude --resume "$parent_sid" --fork-session
         set -e
         tput smcup; tput civis; stty -echo -icanon min 1 time 0
         clear_screen
         return
     fi
 
-    # Write prompt to temp file (handles long/multiline prompts safely)
-    local prompt_file="/tmp/ssread_fork_$$_$(date +%s)"
-    printf '%s' "$fork_prompt" > "$prompt_file"
-
     pane_detach_current
     local win_name="s:f${parent_sid_short}"
     tmux new-window -d -t "$TMUX_SESSION_NAME" -n "$win_name" \
-        "${cd_cmd}claude \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'; trap '' INT HUP; tput civis 2>/dev/null; printf '\\033[H\\033[2J\\n\\033[90m  No session attached\\n\\n  Press Enter on a session to attach\\033[0m'; tmux select-pane -t '${TMUX_SESSION_NAME}:list.0' 2>/dev/null; while true; do sleep 86400; done"
+        "${cd_cmd}claude --resume '${parent_sid}' --fork-session; trap '' INT HUP; tput civis 2>/dev/null; printf '\\033[H\\033[2J\\n\\033[90m  No session attached\\n\\n  Press Enter on a session to attach\\033[0m'; tmux select-pane -t '${TMUX_SESSION_NAME}:list.0' 2>/dev/null; while true; do sleep 86400; done"
     tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:$win_name.0" 2>/dev/null || true
     ATTACHED_SID="fork:${parent_sid_short}"
     tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
