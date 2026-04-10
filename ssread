@@ -255,7 +255,11 @@ pane_detach_current() {
     local sid_short="${ATTACHED_SID:0:8}"
     # Swap session back to its hidden window (placeholder returns to pane 2)
     tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:s:$sid_short.0" 2>/dev/null || true
+    # Reset silence flag — claude is back in the hidden window, clear stale placeholder silence
+    tmux set-option -t "$TMUX_SESSION_NAME:s:$sid_short" monitor-silence 0 2>/dev/null || true
+    tmux set-option -t "$TMUX_SESSION_NAME:s:$sid_short" monitor-silence 15 2>/dev/null || true
     ATTACHED_SID=""
+    ACTIVE_WINDOWS_LAST_REFRESH=0
 }
 
 pane_attach_session() {
@@ -517,7 +521,7 @@ STATUS_MSG_EXPIRE=0
 REFRESH_AFTER_CYCLES=0  # auto-reload sessions after N render cycles
 
 # Spinner for active sessions (cycles each render = every ~2s)
-SPINNER_CHARS=( "◐" "◒" "◑" "◓" )
+SPINNER_CHARS=( "|" "/" "-" "\\" )
 SPINNER_IDX=0
 
 # ── Display List (flat view of the tree) ──────────────────────────────────
