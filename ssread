@@ -357,17 +357,65 @@ draw_vline() {
     done
 }
 
+# ── Width-aware text rendering ─────────────────────────────────────────────
+# Handles wide characters (CJK/Korean = 2 display columns) and ANSI escapes
+# (0 display columns) to prevent text from overflowing pane boundaries.
+_TRUNC_OUT=""
+_TRUNC_W=0
+
+# Get byte length of a string without subprocess (local LC_ALL=C trick)
+_byte_len() { local LC_ALL=C; _BL=${#1}; }
+
+# Truncate text to fit within max display columns.
+# Sets _TRUNC_OUT (truncated string) and _TRUNC_W (actual display width).
+_trunc_to_width() {
+    local text="$1" max="$2"
+    local len=${#text}
+
+    # Fast path: pure ASCII (byte count == char count)
+    _byte_len "$text"
+    if (( _BL == len )); then
+        if (( len <= max )); then
+            _TRUNC_OUT="$text"
+            _TRUNC_W=$len
+        else
+            _TRUNC_OUT="${text:0:$max}"
+            _TRUNC_W=$max
+        fi
+        return
+    fi
+
+    # Slow path: has multi-byte chars and/or ANSI escapes
+    local w=0 i=0 ch in_esc=false cw
+    while (( i < len && w < max )); do
+        ch="${text:$i:1}"
+        if $in_esc; then
+            [[ "$ch" =~ [a-zA-Z] ]] && in_esc=false
+            (( i++ )); continue
+        fi
+        if [[ "$ch" == $'\033' ]]; then
+            in_esc=true
+            (( i++ )); continue
+        fi
+        _byte_len "$ch"
+        cw=1; (( _BL >= 3 )) && cw=2
+        (( w + cw > max )) && break
+        w=$(( w + cw ))
+        (( i++ ))
+    done
+    _TRUNC_OUT="${text:0:$i}"
+    _TRUNC_W=$w
+}
+
 print_at() {
     local row=$1 col=$2 max_width=$3
     shift 3
     local text="$*"
     move_to "$row" "$col"
-    # Use char-based truncation (bash ${:0:N} counts chars, not bytes)
-    # to avoid cutting multi-byte UTF-8 characters mid-sequence
-    local truncated="${text:0:$max_width}"
-    local pad=$(( max_width - ${#truncated} ))
+    _trunc_to_width "$text" "$max_width"
+    local pad=$(( max_width - _TRUNC_W ))
     (( pad < 0 )) && pad=0
-    printf "%s%*s" "$truncated" "$pad" ""
+    printf "%s%*s" "$_TRUNC_OUT" "$pad" ""
 }
 
 print_at_styled() {
@@ -375,10 +423,10 @@ print_at_styled() {
     shift 4
     local text="$*"
     move_to "$row" "$col"
-    local truncated="${text:0:$max_width}"
-    local pad=$(( max_width - ${#truncated} ))
+    _trunc_to_width "$text" "$max_width"
+    local pad=$(( max_width - _TRUNC_W ))
     (( pad < 0 )) && pad=0
-    printf "${style}%s%*s${RESET}" "$truncated" "$pad" ""
+    printf "${style}%s%*s${RESET}" "$_TRUNC_OUT" "$pad" ""
 }
 
 # ── Time Helpers ───────────────────────────────────────────────────────────
