@@ -613,15 +613,24 @@ refresh_active_windows() {
     ACTIVE_WINDOWS_COUNT=0
     WORKING_WINDOWS_STR="|"
     if [[ -n "${TMUX:-}" ]]; then
+        # Get window names and pane PIDs (pane_current_command always returns
+        # the shell name like "zsh", so we check child processes instead)
         local _tmux_out
-        _tmux_out=$(tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name} #{pane_current_command}' 2>/dev/null) || true
-        local name cmd
-        while IFS=' ' read -r name cmd; do
+        _tmux_out=$(tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name} #{pane_pid}' 2>/dev/null) || true
+
+        # Build a lookup of which pane PIDs have "claude" as a child process
+        # Single ps call covers all panes
+        local _ps_out
+        _ps_out=$(ps -e -o ppid=,comm= 2>/dev/null) || true
+
+        local name pid
+        while IFS=' ' read -r name pid; do
             if [[ "$name" == s:* ]]; then
                 local sid_part="${name#s:}"
                 ACTIVE_WINDOWS_STR="${ACTIVE_WINDOWS_STR}${sid_part}|"
                 ACTIVE_WINDOWS_COUNT=$(( ACTIVE_WINDOWS_COUNT + 1 ))
-                if [[ "$cmd" == "claude" ]]; then
+                # Check if this pane's child process is claude
+                if echo "$_ps_out" | grep -q "^ *${pid} claude"; then
                     WORKING_WINDOWS_STR="${WORKING_WINDOWS_STR}${sid_part}|"
                 fi
             fi
@@ -1646,7 +1655,7 @@ draw_session_list() {
                 line1=$(printf " ▶ %-8s %-7s %s%s" "$sid_short" "$elapsed" "$meta" "$marks")
                 print_at_styled "$row" 2 "$LEFT_WIDTH" "${BOLD}${REV}${FG_WHITE}" "$line1"
             else
-                if is_session_working "${SESSION_IDS[$i]}"; then
+                if is_session_active "${SESSION_IDS[$i]}"; then
                     line1=$(printf "   %-8s %-7s %s%s" "$sid_short" "$elapsed" "$meta" "$marks")
                     print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_GREEN}" "$line1"
                 else
