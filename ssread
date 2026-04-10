@@ -512,8 +512,8 @@ STATUS_MSG=""
 STATUS_MSG_EXPIRE=0
 REFRESH_AFTER_CYCLES=0  # auto-reload sessions after N render cycles
 
-# Spinner for active sessions (cycles each render = every ~2s)
-SPINNER_CHARS=( "|" "/" "-" "\\" )
+# Loading animation for working sessions (cycles each render = every ~1s)
+SPINNER_CHARS=( ".  " ".. " "..." )
 SPINNER_IDX=0
 
 # ── Display List (flat view of the tree) ──────────────────────────────────
@@ -613,25 +613,31 @@ refresh_active_windows() {
     ACTIVE_WINDOWS_COUNT=0
     WORKING_WINDOWS_STR="|"
     if [[ -n "${TMUX:-}" ]]; then
-        # Get window names and pane PIDs (pane_current_command always returns
-        # the shell name like "zsh", so we check child processes instead)
         local _tmux_out
         _tmux_out=$(tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name} #{pane_pid}' 2>/dev/null) || true
 
-        # Build a lookup of which pane PIDs have "claude" as a child process
-        # Single ps call covers all panes
+        # Single ps call: get pid, ppid, comm for all processes
         local _ps_out
-        _ps_out=$(ps -e -o ppid=,comm= 2>/dev/null) || true
+        _ps_out=$(ps -e -o pid=,ppid=,comm= 2>/dev/null) || true
 
-        local name pid
-        while IFS=' ' read -r name pid; do
+        local name pane_pid
+        while IFS=' ' read -r name pane_pid; do
             if [[ "$name" == s:* ]]; then
                 local sid_part="${name#s:}"
                 ACTIVE_WINDOWS_STR="${ACTIVE_WINDOWS_STR}${sid_part}|"
                 ACTIVE_WINDOWS_COUNT=$(( ACTIVE_WINDOWS_COUNT + 1 ))
-                # Check if this pane's child process is claude
-                if echo "$_ps_out" | grep -q "^ *${pid} claude"; then
-                    WORKING_WINDOWS_STR="${WORKING_WINDOWS_STR}${sid_part}|"
+
+                # Find claude child of this pane's shell
+                local claude_pid
+                claude_pid=$(echo "$_ps_out" | awk -v pp="$pane_pid" '$2==pp && $3=="claude" {print $1; exit}')
+                if [[ -n "$claude_pid" ]]; then
+                    # Claude is running. Check if it has tool children (not npm/node)
+                    # to distinguish working (tool execution) from idle (prompt)
+                    local has_tools
+                    has_tools=$(echo "$_ps_out" | awk -v pp="$claude_pid" '$2==pp && $3!="npm" && $3!="node" {found=1; exit} END {print found+0}')
+                    if (( has_tools )); then
+                        WORKING_WINDOWS_STR="${WORKING_WINDOWS_STR}${sid_part}|"
+                    fi
                 fi
             fi
         done <<< "$_tmux_out"
@@ -1850,7 +1856,7 @@ PREV_RIGHT_WIDTH=-1
 render() {
     get_dimensions
     refresh_active_windows
-    SPINNER_IDX=$(( (SPINNER_IDX + 1) % 4 ))
+    SPINNER_IDX=$(( (SPINNER_IDX + 1) % 3 ))
     # Deferred auto-refresh: reload sessions after new/fork creates a session
     if (( REFRESH_AFTER_CYCLES > 0 )); then
         REFRESH_AFTER_CYCLES=$(( REFRESH_AFTER_CYCLES - 1 ))
@@ -1899,7 +1905,8 @@ read_key() {
     _KEY=""
     local c="" _read_rc=0
     # Timeout after 2s so we periodically re-render (catches pane resizes, activity updates)
-    IFS= read -rsn1 -t 2 c 2>/dev/null || _read_rc=$?
+    # 1s timeout: fast enough for spinner animation, light on CPU
+    IFS= read -rsn1 -t 1 c 2>/dev/null || _read_rc=$?
     if (( _read_rc > 0 )) && [[ -z "$c" ]]; then
         # Timeout or signal — return empty key to trigger re-render
         return
