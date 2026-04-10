@@ -241,9 +241,9 @@ _ensure_session_window() {
     if [[ -n "$cwd" && -d "$cwd" ]]; then
         cd_cmd="cd $(printf '%q' "$cwd") && "
     fi
-    # After claude exits, show placeholder and sleep forever (keeps pane alive)
+    # After claude exits, show placeholder, auto-focus list pane, then sleep forever
     tmux new-window -d -t "$TMUX_SESSION_NAME" -n "s:$sid_short" \
-        "${cd_cmd}claude --resume '$sid'; trap '' INT HUP; tput civis 2>/dev/null; printf '\\033[H\\033[2J\\n\\033[90m  No session attached\\n\\n  Press Enter on a session to attach\\033[0m'; while true; do sleep 86400; done"
+        "${cd_cmd}claude --resume '$sid'; trap '' INT HUP; tput civis 2>/dev/null; printf '\\033[H\\033[2J\\n\\033[90m  No session attached\\n\\n  Press Enter on a session to attach\\033[0m'; tmux select-pane -t '${TMUX_SESSION_NAME}:list.0' 2>/dev/null; while true; do sleep 86400; done"
     tmux set-option -t "$TMUX_SESSION_NAME:s:$sid_short" monitor-silence 15 2>/dev/null || true
 }
 
@@ -316,13 +316,12 @@ setup_tmux_keybindings() {
     if [[ -z "${TMUX:-}" || -z "$TMUX_SESSION_NAME" ]]; then
         return
     fi
-    # Save original bindings for later restoration
-    ORIG_BIND_0=$(tmux list-keys 2>/dev/null | grep "^bind-key.*\"0\"" | head -1) || true
-    ORIG_BIND_TAB=$(tmux list-keys 2>/dev/null | grep "^bind-key.*\"Tab\"" | head -1) || true
-    # Bind "0" to select list pane (normally selects window 0)
+    # Bind prefix+0 → list pane (overrides select-window :0)
     tmux bind-key 0 select-pane -t "$TMUX_SESSION_NAME:list.0" 2>/dev/null || true
-    # Bind Tab to toggle between panes (normally last-window)
+    # Bind prefix+Tab → toggle between panes (overrides last-window)
     tmux bind-key Tab last-pane 2>/dev/null || true
+    # Bind backtick (`) in root table — no prefix needed, single keypress to return to list
+    tmux bind-key -n '`' select-pane -t "$TMUX_SESSION_NAME:list.0" 2>/dev/null || true
 }
 
 # Restore default tmux key bindings
@@ -332,6 +331,7 @@ restore_tmux_keybindings() {
     fi
     tmux bind-key 0 select-window -t :0 2>/dev/null || true
     tmux bind-key Tab last-window 2>/dev/null || true
+    tmux unbind-key -n '`' 2>/dev/null || true
 }
 
 cleanup() {
@@ -1298,7 +1298,7 @@ fork_session() {
     pane_detach_current
     local win_name="s:f${parent_sid_short}"
     tmux new-window -d -t "$TMUX_SESSION_NAME" -n "$win_name" \
-        "${cd_cmd}claude \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'; trap '' INT HUP; tput civis 2>/dev/null; printf '\\033[H\\033[2J\\n\\033[90m  No session attached\\n\\n  Press Enter on a session to attach\\033[0m'; while true; do sleep 86400; done"
+        "${cd_cmd}claude \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'; trap '' INT HUP; tput civis 2>/dev/null; printf '\\033[H\\033[2J\\n\\033[90m  No session attached\\n\\n  Press Enter on a session to attach\\033[0m'; tmux select-pane -t '${TMUX_SESSION_NAME}:list.0' 2>/dev/null; while true; do sleep 86400; done"
     tmux set-option -t "$TMUX_SESSION_NAME:$win_name" monitor-silence 15 2>/dev/null || true
     tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:$win_name.0" 2>/dev/null || true
     ATTACHED_SID="fork:${parent_sid_short}"
@@ -1409,7 +1409,7 @@ cmd_new_session() {
         pane_detach_current
         local pane_win_name="s:${win_name}"
         tmux new-window -d -t "$TMUX_SESSION_NAME" -n "$pane_win_name" \
-            "${cd_cmd}${branch_cmd}${claude_cmd}; trap '' INT HUP; tput civis 2>/dev/null; printf '\\033[H\\033[2J\\n\\033[90m  No session attached\\n\\n  Press Enter on a session to attach\\033[0m'; while true; do sleep 86400; done"
+            "${cd_cmd}${branch_cmd}${claude_cmd}; trap '' INT HUP; tput civis 2>/dev/null; printf '\\033[H\\033[2J\\n\\033[90m  No session attached\\n\\n  Press Enter on a session to attach\\033[0m'; tmux select-pane -t '${TMUX_SESSION_NAME}:list.0' 2>/dev/null; while true; do sleep 86400; done"
         tmux set-option -t "$TMUX_SESSION_NAME:$pane_win_name" monitor-silence 15 2>/dev/null || true
         tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:$pane_win_name.0" 2>/dev/null || true
         ATTACHED_SID="new:${win_name}"
@@ -1843,7 +1843,7 @@ draw_status_bar() {
         local bar_text=" ↑↓ Navigate  Enter: Open  Esc: Clear search  /: New search  r: Refresh"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     else
-        local bar_text=" j/k Nav  Enter: Open/Fold  b: Bookmark  a: Archive  ^b0: List  /: Search  q: Quit"
+        local bar_text=' j/k Nav  Enter: Open/Fold  b: Bookmark  a: Archive  `: List  /: Search  q: Quit'
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     fi
 }
