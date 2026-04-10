@@ -8,6 +8,7 @@ set -euo pipefail
 # ── Configuration ──────────────────────────────────────────────────────────
 CLAUDE_PROJECTS_DIR="$HOME/.claude/projects"
 SSREAD_BOOKMARKS_FILE="$HOME/.claude/ssread_bookmarks"
+SSREAD_ARCHIVES_FILE="$HOME/.claude/ssread_archives"
 SSREAD_TMUX_SESSION="ssread"
 SSREAD_INSIDE_TMUX="${SSREAD_INSIDE_TMUX:-}"
 
@@ -544,6 +545,49 @@ toggle_bookmark() {
     printf '%s' "$entries" | grep -v '^$' > "$SSREAD_BOOKMARKS_FILE" 2>/dev/null || true
 }
 
+# ── Archives ──────────────────────────────────────────────────────────────
+# Archived sessions are hidden from the main list and bookmarks.
+# Stored as session ID prefixes (first 8 chars), one per line.
+ARCHIVES_STR="|"
+ARCHIVES_FOLDED=true  # archive group is collapsed by default
+
+load_archives() {
+    ARCHIVES_STR="|"
+    if [[ -f "$SSREAD_ARCHIVES_FILE" ]]; then
+        local line
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && ARCHIVES_STR="${ARCHIVES_STR}${line}|"
+        done < "$SSREAD_ARCHIVES_FILE"
+    fi
+}
+
+is_archived() {
+    [[ "$ARCHIVES_STR" == *"|${1:0:8}|"* ]]
+}
+
+toggle_archive() {
+    local sid="$1"
+    local sid_short="${sid:0:8}"
+    if is_archived "$sid"; then
+        # Unarchive
+        local new_str="|"
+        local entry
+        while IFS='|' read -r -d '|' entry; do
+            [[ -n "$entry" && "$entry" != "$sid_short" ]] && new_str="${new_str}${entry}|"
+        done <<< "${ARCHIVES_STR:1}"
+        ARCHIVES_STR="$new_str"
+    else
+        # Archive — also remove bookmark if any
+        ARCHIVES_STR="${ARCHIVES_STR}${sid_short}|"
+        if is_bookmarked "$sid"; then
+            toggle_bookmark "$sid"
+        fi
+    fi
+    # Persist to file
+    local entries="${ARCHIVES_STR//|/$'\n'}"
+    printf '%s' "$entries" | grep -v '^$' > "$SSREAD_ARCHIVES_FILE" 2>/dev/null || true
+}
+
 load_sessions() {
     SESSION_FILES=()
     SESSION_IDS=()
@@ -754,10 +798,11 @@ group_sessions() {
     fi
 
     # Phase 1: Collect bookmarked sessions first (★ Bookmarks group)
+    # Archived sessions are excluded from bookmarks and project groups.
     local -a order=()  # maps: flat index in new order → original index
     local bookmark_count=0
     for (( i=0; i<SESSION_COUNT; i++ )); do
-        if is_bookmarked "${SESSION_IDS[$i]}"; then
+        if is_bookmarked "${SESSION_IDS[$i]}" && ! is_archived "${SESSION_IDS[$i]}"; then
             order+=("$i")
             bookmark_count=$(( bookmark_count + 1 ))
         fi
@@ -772,6 +817,7 @@ group_sessions() {
     # Phase 2: Collect unique project names in first-seen order (= most-recent-first)
     local -a seen_projects=()
     for (( i=0; i<SESSION_COUNT; i++ )); do
+        if is_archived "${SESSION_IDS[$i]}"; then continue; fi
         local proj="${SESSION_PROJECTS[$i]}"
         local found=false
         for sp in "${seen_projects[@]+"${seen_projects[@]}"}"; do
@@ -785,12 +831,12 @@ group_sessions() {
         fi
     done
 
-    # Phase 3: Build project groups (non-bookmarked sessions only)
+    # Phase 3: Build project groups (non-bookmarked, non-archived sessions)
     for proj in "${seen_projects[@]}"; do
         local start=${#order[@]}
         local count=0
         for (( i=0; i<SESSION_COUNT; i++ )); do
-            if [[ "${SESSION_PROJECTS[$i]}" == "$proj" ]] && ! is_bookmarked "${SESSION_IDS[$i]}"; then
+            if [[ "${SESSION_PROJECTS[$i]}" == "$proj" ]] && ! is_bookmarked "${SESSION_IDS[$i]}" && ! is_archived "${SESSION_IDS[$i]}"; then
                 order+=("$i")
                 count=$(( count + 1 ))
             fi
@@ -802,6 +848,22 @@ group_sessions() {
             GROUP_COUNT=$(( GROUP_COUNT + 1 ))
         fi
     done
+
+    # Phase 4: Collect archived sessions at the end
+    local archive_start=${#order[@]}
+    local archive_count=0
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        if is_archived "${SESSION_IDS[$i]}"; then
+            order+=("$i")
+            archive_count=$(( archive_count + 1 ))
+        fi
+    done
+    if (( archive_count > 0 )); then
+        GROUP_NAMES+=("▼ Archive ($archive_count)")
+        GROUP_STARTS+=("$archive_start")
+        GROUP_COUNTS+=("$archive_count")
+        GROUP_COUNT=$(( GROUP_COUNT + 1 ))
+    fi
 
     # Reorder all SESSION_* arrays according to order[]
     local -a nw_FILES=() nw_IDS=() nw_ELAPSED=() nw_DIRS=()
@@ -1343,13 +1405,18 @@ draw_border() {
 
 draw_left_header() {
     local active_count=${ACTIVE_WINDOWS_COUNT:-0}
+    # Count non-archived sessions for display
+    local visible_count=0
+    for (( _h=0; _h<SESSION_COUNT; _h++ )); do
+        is_archived "${SESSION_IDS[$_h]}" || visible_count=$(( visible_count + 1 ))
+    done
     local title
     if [[ -n "$SEARCH_ACTIVE" ]]; then
         title=" Search: \"$SEARCH_ACTIVE\" ($SESSION_COUNT results)"
     elif (( active_count > 0 )); then
-        title=" Sessions ($SESSION_COUNT)  ${FG_GREEN}▸ $active_count running"
+        title=" Sessions ($visible_count)  ${FG_GREEN}▸ $active_count running"
     else
-        title=" Sessions ($SESSION_COUNT)"
+        title=" Sessions ($visible_count)"
     fi
     print_at_styled 1 2 "$LEFT_WIDTH" "${BOLD}${FG_CYAN}" "$title"
 }
@@ -1373,8 +1440,13 @@ draw_session_list() {
         done
     else
         for (( g=0; g<GROUP_COUNT; g++ )); do
+            local gname="${GROUP_NAMES[$g]}"
             display_types+=("group")
             display_indices+=("$g")
+            # Skip sessions for folded archive group (show header only)
+            if [[ "$gname" == "▼ Archive"* ]] && $ARCHIVES_FOLDED; then
+                continue
+            fi
             local gstart="${GROUP_STARTS[$g]}"
             local gcount="${GROUP_COUNTS[$g]}"
             for (( s=0; s<gcount; s++ )); do
@@ -1443,8 +1515,17 @@ draw_session_list() {
             local gname="${GROUP_NAMES[$g]}"
             local gcount="${GROUP_COUNTS[$g]}"
             local header
-            header=$(printf " ┈ %s (%d)" "$gname" "$gcount")
-            print_at_styled "$row" 2 "$LEFT_WIDTH" "${BOLD}${FG_BLUE}" "$header"
+            if [[ "$gname" == "▼ Archive"* ]]; then
+                if $ARCHIVES_FOLDED; then
+                    header=$(printf " ▶ Archive (%d)  [A to expand]" "$gcount")
+                else
+                    header=$(printf " ▼ Archive (%d)  [A to fold]" "$gcount")
+                fi
+                print_at_styled "$row" 2 "$LEFT_WIDTH" "${BOLD}${FG_GRAY}" "$header"
+            else
+                header=$(printf " ┈ %s (%d)" "$gname" "$gcount")
+                print_at_styled "$row" 2 "$LEFT_WIDTH" "${BOLD}${FG_BLUE}" "$header"
+            fi
             row=$(( row + 1 ))
         else
             local i="${display_indices[$d]}"
@@ -1658,7 +1739,7 @@ draw_status_bar() {
         local bar_text=" ↑↓ Navigate  Enter: Open  Esc: Clear search  /: New search  r: Refresh"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     else
-        local bar_text=" j/k Nav  Enter: Attach  b: Bookmark  ^b0: List  ^bTab: Toggle  Esc: Detach  /: Search  q: Quit"
+        local bar_text=" j/k Nav  Enter: Attach  b: Bookmark  a: Archive  A: Fold  ^b0: List  /: Search  q: Quit"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     fi
 }
@@ -1853,6 +1934,24 @@ handle_input() {
                 group_sessions
             fi
             ;;
+        a)
+            if (( SESSION_COUNT > 0 )); then
+                local sid="${SESSION_IDS[$SELECTED]}"
+                toggle_archive "$sid"
+                # Adjust selection if it goes out of range after re-grouping
+                group_sessions
+                if (( SELECTED >= SESSION_COUNT )); then
+                    SELECTED=$(( SESSION_COUNT > 0 ? SESSION_COUNT - 1 : 0 ))
+                fi
+            fi
+            ;;
+        A)
+            if $ARCHIVES_FOLDED; then
+                ARCHIVES_FOLDED=false
+            else
+                ARCHIVES_FOLDED=true
+            fi
+            ;;
         q)
             exit 0
             ;;
@@ -1945,6 +2044,7 @@ main() {
     get_dimensions
     draw_loading
     load_bookmarks
+    load_archives
     load_sessions
     group_sessions
     clear_screen

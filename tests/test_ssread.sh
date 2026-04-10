@@ -464,6 +464,62 @@ source_ssread_functions() {
     [[ "${GROUP_COUNTS[0]}" -eq 1 ]]
 }
 
+# ── Tests: Archives ───────────────────────────────────────────────────────
+
+@test "is_archived returns false when no archives" {
+    source_ssread_functions
+    ARCHIVES_STR="|"
+    ! is_archived "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+}
+
+@test "toggle_archive adds and removes" {
+    source_ssread_functions
+    SSREAD_ARCHIVES_FILE="$TEST_DIR/archives"
+    ARCHIVES_STR="|"
+    toggle_archive "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+    is_archived "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+    toggle_archive "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+    ! is_archived "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+}
+
+@test "archived sessions excluded from project groups" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    SSREAD_BOOKMARKS_FILE="$TEST_DIR/bookmarks"
+    SSREAD_ARCHIVES_FILE="$TEST_DIR/archives"
+    BOOKMARKS_STR="|"
+    ARCHIVES_STR="|"
+    load_sessions
+    local total_before=$SESSION_COUNT
+    # Archive the first session
+    toggle_archive "${SESSION_IDS[0]}"
+    group_sessions
+    # Archive group should exist and contain 1 session
+    local found_archive=false
+    local archive_count=0
+    for (( g=0; g<GROUP_COUNT; g++ )); do
+        if [[ "${GROUP_NAMES[$g]}" == *"Archive"* ]]; then
+            found_archive=true
+            archive_count="${GROUP_COUNTS[$g]}"
+        fi
+    done
+    $found_archive
+    [[ "$archive_count" -eq 1 ]]
+}
+
+@test "archiving removes bookmark" {
+    source_ssread_functions
+    SSREAD_BOOKMARKS_FILE="$TEST_DIR/bookmarks"
+    SSREAD_ARCHIVES_FILE="$TEST_DIR/archives"
+    BOOKMARKS_STR="|"
+    ARCHIVES_STR="|"
+    toggle_bookmark "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+    is_bookmarked "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+    toggle_archive "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+    ! is_bookmarked "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+    is_archived "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+}
+
 # ── Tests: tmux helpers (without actual tmux) ─────────────────────────────
 
 @test "is_session_active returns false when no windows active" {
