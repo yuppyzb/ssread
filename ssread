@@ -180,9 +180,9 @@ write_detail_file() {
         if [[ "$ATTACHED_SID" == "$sid" ]]; then
             printf " %s  ${FG_GREEN}◀ attached${RESET}\n" "$sid"
         elif is_session_needs_attention "$sid"; then
-            printf " %s  ${FG_YELLOW}! needs input${RESET}\n" "$sid"
+            printf " %s  ${FG_YELLOW}● done${RESET}\n" "$sid"
         elif is_session_active "$sid"; then
-            printf " %s  ${FG_GREEN}▸ running${RESET}\n" "$sid"
+            printf " %s  ${FG_GREEN}${SPINNER_CHARS[$SPINNER_IDX]} working${RESET}\n" "$sid"
         else
             printf " %s\n" "$sid"
         fi
@@ -275,9 +275,16 @@ pane_attach_session() {
     # Ensure hidden window exists
     _ensure_session_window "$sid" "$cwd"
 
+    # Reset silence flag so ● clears (toggle monitor-silence off then on)
+    tmux set-option -t "$TMUX_SESSION_NAME:s:$sid_short" monitor-silence 0 2>/dev/null || true
+    tmux set-option -t "$TMUX_SESSION_NAME:s:$sid_short" monitor-silence 15 2>/dev/null || true
+
     # Swap placeholder (pane 2) with the session's hidden window
     tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:s:$sid_short.0" 2>/dev/null || true
     ATTACHED_SID="$sid"
+
+    # Force refresh so indicators update immediately
+    ACTIVE_WINDOWS_LAST_REFRESH=0
 
     # Focus session pane
     tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
@@ -507,6 +514,10 @@ COMMAND_MODE=false
 COMMAND_INPUT=""
 STATUS_MSG=""
 STATUS_MSG_EXPIRE=0
+
+# Spinner for active sessions (cycles each render = every ~2s)
+SPINNER_CHARS=( "◐" "◒" "◑" "◓" )
+SPINNER_IDX=0
 
 # ── Display List (flat view of the tree) ──────────────────────────────────
 # Built by build_display_list(). SELECTED indexes into this.
@@ -1629,9 +1640,9 @@ draw_session_list() {
             if [[ "$ATTACHED_SID" == "${SESSION_IDS[$i]}" ]]; then
                 marks="${marks} ◀"
             elif is_session_needs_attention "${SESSION_IDS[$i]}"; then
-                marks="${marks} !"
+                marks="${marks} ●"
             elif is_session_active "${SESSION_IDS[$i]}"; then
-                marks="${marks} ▸"
+                marks="${marks} ${SPINNER_CHARS[$SPINNER_IDX]}"
             fi
             local ctx_val="${SESSION_CTX[$i]}"
             if (( ctx_val > CTX_WARN_THRESHOLD )); then
@@ -1651,7 +1662,7 @@ draw_session_list() {
                 line1=$(printf " ▶ %-8s %-7s %s%s" "$sid_short" "$elapsed" "$meta" "$marks")
                 print_at_styled "$row" 2 "$LEFT_WIDTH" "${BOLD}${REV}${FG_WHITE}" "$line1"
             else
-                if [[ "$marks" == *"▸"* ]]; then
+                if is_session_active "${SESSION_IDS[$i]}"; then
                     line1=$(printf "   %-8s %-7s %s%s" "$sid_short" "$elapsed" "$meta" "$marks")
                     print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_GREEN}" "$line1"
                 else
@@ -1713,9 +1724,9 @@ draw_detail_panel() {
     if [[ "$ATTACHED_SID" == "$sid" ]]; then
         print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_GREEN}◀ attached"
     elif is_session_needs_attention "$sid"; then
-        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_YELLOW}! needs input"
+        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_YELLOW}● done"
     elif is_session_active "$sid"; then
-        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_GREEN}▸ running"
+        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_GREEN}${SPINNER_CHARS[$SPINNER_IDX]} working"
     else
         print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid"
     fi
@@ -1846,6 +1857,7 @@ PREV_RIGHT_WIDTH=-1
 render() {
     get_dimensions
     refresh_active_windows
+    SPINNER_IDX=$(( (SPINNER_IDX + 1) % 4 ))
     # In 3-pane layout, ssread is always in the left pane (list only)
     if $LAYOUT_ACTIVE; then
         LEFT_WIDTH=$(( TERM_COLS - 2 ))
