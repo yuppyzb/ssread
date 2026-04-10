@@ -460,7 +460,7 @@ source_ssread_functions() {
     toggle_bookmark "${SESSION_IDS[$last_idx]}"
     group_sessions
     # First group should be bookmarks
-    [[ "${GROUP_NAMES[0]}" == "★ Bookmarks" ]]
+    [[ "${GROUP_NAMES[0]}" == "Bookmarks" ]]
     [[ "${GROUP_COUNTS[0]}" -eq 1 ]]
 }
 

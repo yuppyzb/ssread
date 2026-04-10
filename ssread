@@ -146,7 +146,13 @@ write_detail_file() {
         return
     fi
 
-    local i=$SELECTED
+    local i
+    i=$(selected_session_idx)
+    if [[ -z "$i" ]]; then
+        printf ' ${FG_GRAY}No session selected${RESET}\n' > "$DETAIL_FILE"
+        return
+    fi
+
     local sid="${SESSION_IDS[$i]}"
     local project="${SESSION_PROJECTS[$i]}"
     local branch="${SESSION_BRANCHES[$i]}"
@@ -432,7 +438,7 @@ declare -a SESSION_CTX_SHORT=()   # pre-computed formatted token count
 CTX_WARN_THRESHOLD=80000  # show ⚠ when context exceeds this
 
 SESSION_COUNT=0
-SELECTED=0
+SELECTED=0       # index into DISPLAY_* arrays (not SESSION_*)
 SCROLL_OFFSET=0
 SEARCH_QUERY=""
 SEARCH_MODE=false
@@ -442,6 +448,69 @@ COMMAND_MODE=false
 COMMAND_INPUT=""
 STATUS_MSG=""
 STATUS_MSG_EXPIRE=0
+
+# ── Display List (flat view of the tree) ──────────────────────────────────
+# Built by build_display_list(). SELECTED indexes into this.
+declare -a DISPLAY_TYPES=()    # "group" | "session"
+declare -a DISPLAY_INDICES=()  # group index (for group) or session index (for session)
+DISPLAY_COUNT=0
+
+# ── Group Fold State ──────────────────────────────────────────────────────
+# Stores folded group names as "|name1|name2|" for O(1) lookup.
+FOLDED_GROUPS_STR="|Archive|"  # archives folded by default
+
+is_group_folded() {
+    [[ "$FOLDED_GROUPS_STR" == *"|${1}|"* ]]
+}
+
+toggle_group_fold() {
+    local name="$1"
+    if is_group_folded "$name"; then
+        FOLDED_GROUPS_STR="${FOLDED_GROUPS_STR/"|${name}|"/"|"}"
+    else
+        FOLDED_GROUPS_STR="${FOLDED_GROUPS_STR}${name}|"
+    fi
+}
+
+# Build flat display list from groups, respecting fold state
+build_display_list() {
+    DISPLAY_TYPES=()
+    DISPLAY_INDICES=()
+
+    if [[ -n "$SEARCH_ACTIVE" ]] || (( GROUP_COUNT == 0 )); then
+        for (( i=0; i<SESSION_COUNT; i++ )); do
+            DISPLAY_TYPES+=("session")
+            DISPLAY_INDICES+=("$i")
+        done
+    else
+        for (( g=0; g<GROUP_COUNT; g++ )); do
+            DISPLAY_TYPES+=("group")
+            DISPLAY_INDICES+=("$g")
+            local gname="${GROUP_NAMES[$g]}"
+            if ! is_group_folded "$gname"; then
+                local gstart="${GROUP_STARTS[$g]}"
+                local gcount="${GROUP_COUNTS[$g]}"
+                for (( s=0; s<gcount; s++ )); do
+                    DISPLAY_TYPES+=("session")
+                    DISPLAY_INDICES+=("$(( gstart + s ))")
+                done
+            fi
+        done
+    fi
+    DISPLAY_COUNT=${#DISPLAY_TYPES[@]}
+
+    # Clamp SELECTED
+    if (( SELECTED >= DISPLAY_COUNT )); then
+        SELECTED=$(( DISPLAY_COUNT > 0 ? DISPLAY_COUNT - 1 : 0 ))
+    fi
+}
+
+# Get session array index for current selection. Returns "" if group is selected.
+selected_session_idx() {
+    if (( SELECTED >= 0 && SELECTED < DISPLAY_COUNT )) && [[ "${DISPLAY_TYPES[$SELECTED]}" == "session" ]]; then
+        echo "${DISPLAY_INDICES[$SELECTED]}"
+    fi
+}
 
 # Detail-level fields (lazy loaded for one session at a time)
 DETAIL_SID=""         # which session is currently loaded
@@ -549,7 +618,7 @@ toggle_bookmark() {
 # Archived sessions are hidden from the main list and bookmarks.
 # Stored as session ID prefixes (first 8 chars), one per line.
 ARCHIVES_STR="|"
-ARCHIVES_FOLDED=true  # archive group is collapsed by default
+# Archive fold state is managed by FOLDED_GROUPS_STR (default: folded)
 
 load_archives() {
     ARCHIVES_STR="|"
@@ -808,7 +877,7 @@ group_sessions() {
         fi
     done
     if (( bookmark_count > 0 )); then
-        GROUP_NAMES+=("★ Bookmarks")
+        GROUP_NAMES+=("Bookmarks")
         GROUP_STARTS+=(0)
         GROUP_COUNTS+=("$bookmark_count")
         GROUP_COUNT=$(( GROUP_COUNT + 1 ))
@@ -859,7 +928,7 @@ group_sessions() {
         fi
     done
     if (( archive_count > 0 )); then
-        GROUP_NAMES+=("▼ Archive ($archive_count)")
+        GROUP_NAMES+=("Archive")
         GROUP_STARTS+=("$archive_start")
         GROUP_COUNTS+=("$archive_count")
         GROUP_COUNT=$(( GROUP_COUNT + 1 ))
@@ -1272,6 +1341,7 @@ cmd_new_session() {
     set_status_msg "New session launched in $root"
     load_sessions
     group_sessions
+    build_display_list
 }
 
 execute_command() {
@@ -1426,72 +1496,26 @@ draw_right_header() {
 }
 
 draw_session_list() {
-    # Build a flat display list: each entry is either a group header or a session.
-    # display_types[n] = "group" | "session"
-    # display_indices[n] = group index (for group) or session index (for session)
-    local -a display_types=()
-    local -a display_indices=()
-
-    if [[ -n "$SEARCH_ACTIVE" ]] || (( GROUP_COUNT == 0 )); then
-        # In search mode or no groups: flat list, no headers
-        for (( i=0; i<SESSION_COUNT; i++ )); do
-            display_types+=("session")
-            display_indices+=("$i")
-        done
-    else
-        for (( g=0; g<GROUP_COUNT; g++ )); do
-            local gname="${GROUP_NAMES[$g]}"
-            display_types+=("group")
-            display_indices+=("$g")
-            # Skip sessions for folded archive group (show header only)
-            if [[ "$gname" == "▼ Archive"* ]] && $ARCHIVES_FOLDED; then
-                continue
-            fi
-            local gstart="${GROUP_STARTS[$g]}"
-            local gcount="${GROUP_COUNTS[$g]}"
-            for (( s=0; s<gcount; s++ )); do
-                display_types+=("session")
-                display_indices+=("$(( gstart + s ))")
-            done
-        done
-    fi
-
-    local display_total=${#display_types[@]}
-
-    # Map SELECTED (session index) to display index for scroll calculation
-    local selected_display=0
-    for (( d=0; d<display_total; d++ )); do
-        if [[ "${display_types[$d]}" == "session" && "${display_indices[$d]}" -eq "$SELECTED" ]]; then
-            selected_display=$d
-            break
-        fi
-    done
-
-    # Scroll: each item takes 1 line (group header) or 2 lines (session)
-    # Calculate total row heights for scroll
+    # Uses the global DISPLAY_TYPES/DISPLAY_INDICES built by build_display_list()
     local visible_rows=$(( TERM_ROWS - 4 ))
 
-    # Adjust scroll offset (in display indices) so selected is visible
-    if (( selected_display < SCROLL_OFFSET )); then
-        SCROLL_OFFSET=$selected_display
-        # Include group header above if the selected is first in its group
-        if (( SCROLL_OFFSET > 0 )) && [[ "${display_types[$((SCROLL_OFFSET-1))]}" == "group" ]]; then
-            SCROLL_OFFSET=$(( SCROLL_OFFSET - 1 ))
-        fi
+    # Adjust scroll offset so SELECTED is visible
+    if (( SELECTED < SCROLL_OFFSET )); then
+        SCROLL_OFFSET=$SELECTED
     fi
 
-    # Forward scroll: render from SCROLL_OFFSET until selected is visible
+    # Forward scroll: ensure selected item fits on screen
     local test_row=0
     local need_scroll=true
     while $need_scroll; do
         test_row=0
-        for (( d=SCROLL_OFFSET; d<display_total; d++ )); do
-            if [[ "${display_types[$d]}" == "group" ]]; then
+        for (( d=SCROLL_OFFSET; d<DISPLAY_COUNT; d++ )); do
+            if [[ "${DISPLAY_TYPES[$d]}" == "group" ]]; then
                 test_row=$(( test_row + 1 ))
             else
                 test_row=$(( test_row + 2 ))
             fi
-            if (( d == selected_display )); then
+            if (( d == SELECTED )); then
                 if (( test_row <= visible_rows )); then
                     need_scroll=false
                 else
@@ -1500,35 +1524,37 @@ draw_session_list() {
                 break
             fi
         done
-        # Safety: if we've scrolled past everything
-        if (( SCROLL_OFFSET >= display_total )); then
-            SCROLL_OFFSET=$(( display_total > 0 ? display_total - 1 : 0 ))
+        if (( SCROLL_OFFSET >= DISPLAY_COUNT )); then
+            SCROLL_OFFSET=$(( DISPLAY_COUNT > 0 ? DISPLAY_COUNT - 1 : 0 ))
             break
         fi
     done
 
     # Render
     local row=2
-    for (( d=SCROLL_OFFSET; d<display_total && row < TERM_ROWS - 1; d++ )); do
-        if [[ "${display_types[$d]}" == "group" ]]; then
-            local g="${display_indices[$d]}"
+    for (( d=SCROLL_OFFSET; d<DISPLAY_COUNT && row < TERM_ROWS - 1; d++ )); do
+        if [[ "${DISPLAY_TYPES[$d]}" == "group" ]]; then
+            local g="${DISPLAY_INDICES[$d]}"
             local gname="${GROUP_NAMES[$g]}"
             local gcount="${GROUP_COUNTS[$g]}"
+            local fold_icon
+            if is_group_folded "$gname"; then fold_icon="▶"; else fold_icon="▼"; fi
             local header
-            if [[ "$gname" == "▼ Archive"* ]]; then
-                if $ARCHIVES_FOLDED; then
-                    header=$(printf " ▶ Archive (%d)  [A to expand]" "$gcount")
-                else
-                    header=$(printf " ▼ Archive (%d)  [A to fold]" "$gcount")
-                fi
-                print_at_styled "$row" 2 "$LEFT_WIDTH" "${BOLD}${FG_GRAY}" "$header"
+            if [[ "$gname" == "Bookmarks" ]]; then
+                header=$(printf " %s ★ %s (%d)" "$fold_icon" "$gname" "$gcount")
             else
-                header=$(printf " ┈ %s (%d)" "$gname" "$gcount")
-                print_at_styled "$row" 2 "$LEFT_WIDTH" "${BOLD}${FG_BLUE}" "$header"
+                header=$(printf " %s %s (%d)" "$fold_icon" "$gname" "$gcount")
+            fi
+            local gstyle="${BOLD}${FG_BLUE}"
+            [[ "$gname" == "Archive" ]] && gstyle="${BOLD}${FG_GRAY}"
+            if (( d == SELECTED )); then
+                print_at_styled "$row" 2 "$LEFT_WIDTH" "${REV}${gstyle}" "$header"
+            else
+                print_at_styled "$row" 2 "$LEFT_WIDTH" "$gstyle" "$header"
             fi
             row=$(( row + 1 ))
         else
-            local i="${display_indices[$d]}"
+            local i="${DISPLAY_INDICES[$d]}"
             local sid_short="${SESSION_IDS[$i]:0:8}"
             local elapsed="${SESSION_ELAPSED[$i]}"
             local branch="${SESSION_BRANCHES[$i]}"
@@ -1559,7 +1585,7 @@ draw_session_list() {
             # Line 1: sid, elapsed, model, ctx, marks
             local meta="${model_short} ${ctx_short}"
             local line1
-            if (( i == SELECTED )); then
+            if (( d == SELECTED )); then
                 line1=$(printf " ▶ %-8s %-7s %s%s" "$sid_short" "$elapsed" "$meta" "$marks")
                 print_at_styled "$row" 2 "$LEFT_WIDTH" "${BOLD}${REV}${FG_WHITE}" "$line1"
             else
@@ -1575,7 +1601,7 @@ draw_session_list() {
 
             # Line 2: first message (session purpose)
             local line2="     ${first_msg}"
-            if (( i == SELECTED )); then
+            if (( d == SELECTED )); then
                 print_at_styled "$row" 2 "$LEFT_WIDTH" "${REV}${FG_GRAY}" "$line2"
             else
                 print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_GRAY}" "$line2"
@@ -1595,8 +1621,10 @@ draw_detail_panel() {
     local width=$(( RIGHT_WIDTH - 2 ))
     local row=2
 
-    if (( SESSION_COUNT == 0 )); then
-        print_at_styled "$row" "$col" "$width" "${FG_GRAY}" "  No sessions found."
+    local i
+    i=$(selected_session_idx)
+    if [[ -z "$i" ]] || (( SESSION_COUNT == 0 )); then
+        print_at_styled "$row" "$col" "$width" "${FG_GRAY}" "  No session selected."
         row=$(( row + 1 ))
         while (( row < TERM_ROWS - 1 )); do
             print_at "$row" "$col" "$width" ""
@@ -1605,7 +1633,6 @@ draw_detail_panel() {
         return
     fi
 
-    local i=$SELECTED
     local sid="${SESSION_IDS[$i]}"
     local project="${SESSION_PROJECTS[$i]}"
     local branch="${SESSION_BRANCHES[$i]}"
@@ -1739,7 +1766,7 @@ draw_status_bar() {
         local bar_text=" ↑↓ Navigate  Enter: Open  Esc: Clear search  /: New search  r: Refresh"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     else
-        local bar_text=" j/k Nav  Enter: Attach  b: Bookmark  a: Archive  A: Fold  ^b0: List  /: Search  q: Quit"
+        local bar_text=" j/k Nav  Enter: Open/Fold  b: Bookmark  a: Archive  ^b0: List  /: Search  q: Quit"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     fi
 }
@@ -1832,6 +1859,7 @@ handle_search_input() {
                 load_sessions
                 search_sessions "$SEARCH_ACTIVE"
                 group_sessions
+                build_display_list
             fi
             ;;
         ESC)
@@ -1844,6 +1872,7 @@ handle_search_input() {
                 SCROLL_OFFSET=0
                 load_sessions
                 group_sessions
+                build_display_list
             fi
             SEARCH_QUERY=""
             ;;
@@ -1902,54 +1931,58 @@ handle_input() {
             fi
             ;;
         "ESC[B"|j)
-            if (( SELECTED < SESSION_COUNT - 1 )); then
+            if (( SELECTED < DISPLAY_COUNT - 1 )); then
                 SELECTED=$(( SELECTED + 1 ))
             fi
             ;;
         ENTER)
-            if (( SESSION_COUNT > 0 )); then
-                local sid="${SESSION_IDS[$SELECTED]}"
-                local cwd="${SESSION_CWDS[$SELECTED]}"
-                if [[ -n "${TMUX:-}" ]]; then
-                    pane_attach_session "$sid" "$cwd"
+            if (( DISPLAY_COUNT > 0 && SELECTED < DISPLAY_COUNT )); then
+                if [[ "${DISPLAY_TYPES[$SELECTED]}" == "group" ]]; then
+                    # Toggle fold on group header
+                    local g="${DISPLAY_INDICES[$SELECTED]}"
+                    toggle_group_fold "${GROUP_NAMES[$g]}"
+                    build_display_list
                 else
-                    launch_session_direct "$sid" "$cwd"
+                    # Attach session
+                    local si="${DISPLAY_INDICES[$SELECTED]}"
+                    local sid="${SESSION_IDS[$si]}"
+                    local cwd="${SESSION_CWDS[$si]}"
+                    if [[ -n "${TMUX:-}" ]]; then
+                        pane_attach_session "$sid" "$cwd"
+                    else
+                        launch_session_direct "$sid" "$cwd"
+                    fi
                 fi
             fi
             ;;
         TAB)
             if [[ -n "${TMUX:-}" && -n "$ATTACHED_SID" ]]; then
-                # Toggle focus to session pane (pane 2 in 3-pane layout)
                 tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
             fi
             ;;
         f)
-            if (( SESSION_COUNT > 0 )); then
-                fork_session "$SELECTED"
+            local _si
+            _si=$(selected_session_idx)
+            if [[ -n "$_si" ]]; then
+                fork_session "$_si"
             fi
             ;;
         b)
-            if (( SESSION_COUNT > 0 )); then
-                toggle_bookmark "${SESSION_IDS[$SELECTED]}"
+            local _si
+            _si=$(selected_session_idx)
+            if [[ -n "$_si" ]]; then
+                toggle_bookmark "${SESSION_IDS[$_si]}"
                 group_sessions
+                build_display_list
             fi
             ;;
         a)
-            if (( SESSION_COUNT > 0 )); then
-                local sid="${SESSION_IDS[$SELECTED]}"
-                toggle_archive "$sid"
-                # Adjust selection if it goes out of range after re-grouping
+            local _si
+            _si=$(selected_session_idx)
+            if [[ -n "$_si" ]]; then
+                toggle_archive "${SESSION_IDS[$_si]}"
                 group_sessions
-                if (( SELECTED >= SESSION_COUNT )); then
-                    SELECTED=$(( SESSION_COUNT > 0 ? SESSION_COUNT - 1 : 0 ))
-                fi
-            fi
-            ;;
-        A)
-            if $ARCHIVES_FOLDED; then
-                ARCHIVES_FOLDED=false
-            else
-                ARCHIVES_FOLDED=true
+                build_display_list
             fi
             ;;
         q)
@@ -1976,6 +2009,7 @@ handle_input() {
                 SCROLL_OFFSET=0
                 load_sessions
                 group_sessions
+                build_display_list
             elif [[ -n "$ATTACHED_SID" ]]; then
                 pane_detach_current
             fi
@@ -1987,14 +2021,15 @@ handle_input() {
             draw_loading
             load_sessions
             group_sessions
+            build_display_list
             ;;
         g)
             SELECTED=0
             SCROLL_OFFSET=0
             ;;
         G)
-            if (( SESSION_COUNT > 0 )); then
-                SELECTED=$(( SESSION_COUNT - 1 ))
+            if (( DISPLAY_COUNT > 0 )); then
+                SELECTED=$(( DISPLAY_COUNT - 1 ))
             fi
             ;;
     esac
@@ -2047,6 +2082,7 @@ main() {
     load_archives
     load_sessions
     group_sessions
+    build_display_list
     clear_screen
     setup_pane_layout
 
