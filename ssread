@@ -514,6 +514,7 @@ COMMAND_MODE=false
 COMMAND_INPUT=""
 STATUS_MSG=""
 STATUS_MSG_EXPIRE=0
+REFRESH_AFTER_CYCLES=0  # auto-reload sessions after N render cycles
 
 # Spinner for active sessions (cycles each render = every ~2s)
 SPINNER_CHARS=( "◐" "◒" "◑" "◓" )
@@ -1298,6 +1299,7 @@ fork_session() {
     tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:$win_name.0" 2>/dev/null || true
     ATTACHED_SID="fork:${parent_sid_short}"
     tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
+    REFRESH_AFTER_CYCLES=2
 }
 
 # ── Command Mode ───────────────────────────────────────────────────────────
@@ -1410,11 +1412,9 @@ cmd_new_session() {
         tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
     fi
 
-    # Refresh session list after short delay for the new session to register
     set_status_msg "New session launched in $root"
-    load_sessions
-    group_sessions
-    build_display_list
+    # Defer session list reload — Claude needs time to create the .jsonl file
+    REFRESH_AFTER_CYCLES=2
 }
 
 execute_command() {
@@ -1858,6 +1858,15 @@ render() {
     get_dimensions
     refresh_active_windows
     SPINNER_IDX=$(( (SPINNER_IDX + 1) % 4 ))
+    # Deferred auto-refresh: reload sessions after new/fork creates a session
+    if (( REFRESH_AFTER_CYCLES > 0 )); then
+        REFRESH_AFTER_CYCLES=$(( REFRESH_AFTER_CYCLES - 1 ))
+        if (( REFRESH_AFTER_CYCLES == 0 )); then
+            load_sessions
+            group_sessions
+            build_display_list
+        fi
+    fi
     # In 3-pane layout, ssread is always in the left pane (list only)
     if $LAYOUT_ACTIVE; then
         LEFT_WIDTH=$(( TERM_COLS - 2 ))
