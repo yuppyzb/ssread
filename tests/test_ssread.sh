@@ -540,22 +540,30 @@ source_ssread_functions() {
     ! is_session_active "bbbb2222-cccc-dddd-eeee-ffffffffffff"
 }
 
-@test "is_session_needs_attention returns false when no silence" {
+@test "is_session_working returns false when not in working set" {
     source_ssread_functions
-    SILENCE_WINDOWS_STR="|"
-    ! is_session_needs_attention "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+    WORKING_WINDOWS_STR="|"
+    ! is_session_working "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 }
 
-@test "is_session_needs_attention returns true when silence flag set" {
+@test "is_session_working returns true when claude is running" {
     source_ssread_functions
-    SILENCE_WINDOWS_STR="|aaaa1111|"
-    is_session_needs_attention "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+    WORKING_WINDOWS_STR="|aaaa1111|"
+    is_session_working "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 }
 
-@test "is_session_needs_attention returns false for non-matching session" {
+@test "is_session_done returns true when active but not working" {
     source_ssread_functions
-    SILENCE_WINDOWS_STR="|aaaa1111|"
-    ! is_session_needs_attention "bbbb2222-cccc-dddd-eeee-ffffffffffff"
+    ACTIVE_WINDOWS_STR="|aaaa1111|"
+    WORKING_WINDOWS_STR="|"
+    is_session_done "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+}
+
+@test "is_session_done returns false when still working" {
+    source_ssread_functions
+    ACTIVE_WINDOWS_STR="|aaaa1111|"
+    WORKING_WINDOWS_STR="|aaaa1111|"
+    ! is_session_done "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 }
 
 @test "tmux_active_count returns 0 when not in tmux" {

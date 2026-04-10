@@ -179,10 +179,10 @@ write_detail_file() {
         printf "${BOLD}${FG_YELLOW} Session${RESET}\n"
         if [[ "$ATTACHED_SID" == "$sid" ]]; then
             printf " %s  ${FG_GREEN}◀ attached${RESET}\n" "$sid"
-        elif is_session_needs_attention "$sid"; then
-            printf " %s  ${FG_YELLOW}● done${RESET}\n" "$sid"
-        elif is_session_active "$sid"; then
+        elif is_session_working "$sid"; then
             printf " %s  ${FG_GREEN}${SPINNER_CHARS[$SPINNER_IDX]} working${RESET}\n" "$sid"
+        elif is_session_done "$sid"; then
+            printf " %s  ${FG_YELLOW}● done${RESET}\n" "$sid"
         else
             printf " %s\n" "$sid"
         fi
@@ -244,7 +244,6 @@ _ensure_session_window() {
     # After claude exits, show placeholder, auto-focus list pane, then sleep forever
     tmux new-window -d -t "$TMUX_SESSION_NAME" -n "s:$sid_short" \
         "${cd_cmd}claude --resume '$sid'; trap '' INT HUP; tput civis 2>/dev/null; printf '\\033[H\\033[2J\\n\\033[90m  No session attached\\n\\n  Press Enter on a session to attach\\033[0m'; tmux select-pane -t '${TMUX_SESSION_NAME}:list.0' 2>/dev/null; while true; do sleep 86400; done"
-    tmux set-option -t "$TMUX_SESSION_NAME:s:$sid_short" monitor-silence 15 2>/dev/null || true
 }
 
 # Swap pane 2 with a hidden session window (layout stays fixed)
@@ -255,9 +254,6 @@ pane_detach_current() {
     local sid_short="${ATTACHED_SID:0:8}"
     # Swap session back to its hidden window (placeholder returns to pane 2)
     tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:s:$sid_short.0" 2>/dev/null || true
-    # Reset silence flag — claude is back in the hidden window, clear stale placeholder silence
-    tmux set-option -t "$TMUX_SESSION_NAME:s:$sid_short" monitor-silence 0 2>/dev/null || true
-    tmux set-option -t "$TMUX_SESSION_NAME:s:$sid_short" monitor-silence 15 2>/dev/null || true
     ATTACHED_SID=""
     ACTIVE_WINDOWS_LAST_REFRESH=0
 }
@@ -278,10 +274,6 @@ pane_attach_session() {
 
     # Ensure hidden window exists
     _ensure_session_window "$sid" "$cwd"
-
-    # Reset silence flag so ● clears (toggle monitor-silence off then on)
-    tmux set-option -t "$TMUX_SESSION_NAME:s:$sid_short" monitor-silence 0 2>/dev/null || true
-    tmux set-option -t "$TMUX_SESSION_NAME:s:$sid_short" monitor-silence 15 2>/dev/null || true
 
     # Swap placeholder (pane 2) with the session's hidden window
     tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:s:$sid_short.0" 2>/dev/null || true
@@ -603,35 +595,34 @@ declare -a GROUP_STARTS=()
 declare -a GROUP_COUNTS=()
 GROUP_COUNT=0
 
-# Cache of active tmux window names (refreshed periodically)
-# Windows use "s:XXXXXXXX" naming convention. We strip the prefix for matching.
-# Stored as "|sid1|sid2|" for fast substring match without subprocess.
-ACTIVE_WINDOWS_STR="|"
+# Cache of active tmux window states (refreshed periodically)
+# Uses pane_current_command to detect actual process state:
+#   "claude" → session is working (show spinner)
+#   anything else (sleep/bash) → session is done (show ●)
+ACTIVE_WINDOWS_STR="|"    # all s:* windows
 ACTIVE_WINDOWS_COUNT=0
-SILENCE_WINDOWS_STR="|"
+WORKING_WINDOWS_STR="|"   # windows where claude is actively running
 ACTIVE_WINDOWS_LAST_REFRESH=0
 
 refresh_active_windows() {
     local now=${EPOCHSECONDS:-$(date +%s)}
-    # Refresh at most every 2 seconds
     if (( now - ACTIVE_WINDOWS_LAST_REFRESH < 2 )); then
         return
     fi
     ACTIVE_WINDOWS_STR="|"
     ACTIVE_WINDOWS_COUNT=0
-    SILENCE_WINDOWS_STR="|"
+    WORKING_WINDOWS_STR="|"
     if [[ -n "${TMUX:-}" ]]; then
-        # Use here-string instead of process substitution to avoid FD leak in bash 3.2
         local _tmux_out
-        _tmux_out=$(tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name} #{window_silence_flag}' 2>/dev/null) || true
-        local name flag
-        while IFS=' ' read -r name flag; do
+        _tmux_out=$(tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name} #{pane_current_command}' 2>/dev/null) || true
+        local name cmd
+        while IFS=' ' read -r name cmd; do
             if [[ "$name" == s:* ]]; then
                 local sid_part="${name#s:}"
                 ACTIVE_WINDOWS_STR="${ACTIVE_WINDOWS_STR}${sid_part}|"
                 ACTIVE_WINDOWS_COUNT=$(( ACTIVE_WINDOWS_COUNT + 1 ))
-                if [[ "$flag" == "1" ]]; then
-                    SILENCE_WINDOWS_STR="${SILENCE_WINDOWS_STR}${sid_part}|"
+                if [[ "$cmd" == "claude" ]]; then
+                    WORKING_WINDOWS_STR="${WORKING_WINDOWS_STR}${sid_part}|"
                 fi
             fi
         done <<< "$_tmux_out"
@@ -643,8 +634,14 @@ is_session_active() {
     [[ "$ACTIVE_WINDOWS_STR" == *"|${1:0:8}|"* ]]
 }
 
-is_session_needs_attention() {
-    [[ "$SILENCE_WINDOWS_STR" == *"|${1:0:8}|"* ]]
+# Session has a window but claude is NOT running (done/ended)
+is_session_done() {
+    is_session_active "$1" && [[ "$WORKING_WINDOWS_STR" != *"|${1:0:8}|"* ]]
+}
+
+# Session has a window and claude IS running
+is_session_working() {
+    [[ "$WORKING_WINDOWS_STR" == *"|${1:0:8}|"* ]]
 }
 
 extract_project_name() {
@@ -1299,7 +1296,6 @@ fork_session() {
     local win_name="s:f${parent_sid_short}"
     tmux new-window -d -t "$TMUX_SESSION_NAME" -n "$win_name" \
         "${cd_cmd}claude \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'; trap '' INT HUP; tput civis 2>/dev/null; printf '\\033[H\\033[2J\\n\\033[90m  No session attached\\n\\n  Press Enter on a session to attach\\033[0m'; tmux select-pane -t '${TMUX_SESSION_NAME}:list.0' 2>/dev/null; while true; do sleep 86400; done"
-    tmux set-option -t "$TMUX_SESSION_NAME:$win_name" monitor-silence 15 2>/dev/null || true
     tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:$win_name.0" 2>/dev/null || true
     ATTACHED_SID="fork:${parent_sid_short}"
     tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
@@ -1410,7 +1406,6 @@ cmd_new_session() {
         local pane_win_name="s:${win_name}"
         tmux new-window -d -t "$TMUX_SESSION_NAME" -n "$pane_win_name" \
             "${cd_cmd}${branch_cmd}${claude_cmd}; trap '' INT HUP; tput civis 2>/dev/null; printf '\\033[H\\033[2J\\n\\033[90m  No session attached\\n\\n  Press Enter on a session to attach\\033[0m'; tmux select-pane -t '${TMUX_SESSION_NAME}:list.0' 2>/dev/null; while true; do sleep 86400; done"
-        tmux set-option -t "$TMUX_SESSION_NAME:$pane_win_name" monitor-silence 15 2>/dev/null || true
         tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:$pane_win_name.0" 2>/dev/null || true
         ATTACHED_SID="new:${win_name}"
         tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
@@ -1643,10 +1638,10 @@ draw_session_list() {
             local marks=""
             if [[ "$ATTACHED_SID" == "${SESSION_IDS[$i]}" ]]; then
                 marks="${marks} ◀"
-            elif is_session_needs_attention "${SESSION_IDS[$i]}"; then
-                marks="${marks} ●"
-            elif is_session_active "${SESSION_IDS[$i]}"; then
+            elif is_session_working "${SESSION_IDS[$i]}"; then
                 marks="${marks} ${SPINNER_CHARS[$SPINNER_IDX]}"
+            elif is_session_done "${SESSION_IDS[$i]}"; then
+                marks="${marks} ●"
             fi
             local ctx_val="${SESSION_CTX[$i]}"
             if (( ctx_val > CTX_WARN_THRESHOLD )); then
@@ -1666,7 +1661,7 @@ draw_session_list() {
                 line1=$(printf " ▶ %-8s %-7s %s%s" "$sid_short" "$elapsed" "$meta" "$marks")
                 print_at_styled "$row" 2 "$LEFT_WIDTH" "${BOLD}${REV}${FG_WHITE}" "$line1"
             else
-                if is_session_active "${SESSION_IDS[$i]}"; then
+                if is_session_working "${SESSION_IDS[$i]}"; then
                     line1=$(printf "   %-8s %-7s %s%s" "$sid_short" "$elapsed" "$meta" "$marks")
                     print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_GREEN}" "$line1"
                 else
@@ -1727,10 +1722,10 @@ draw_detail_panel() {
     row=$(( row + 1 ))
     if [[ "$ATTACHED_SID" == "$sid" ]]; then
         print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_GREEN}◀ attached"
-    elif is_session_needs_attention "$sid"; then
-        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_YELLOW}● done"
-    elif is_session_active "$sid"; then
+    elif is_session_working "$sid"; then
         print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_GREEN}${SPINNER_CHARS[$SPINNER_IDX]} working"
+    elif is_session_done "$sid"; then
+        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_YELLOW}● done"
     else
         print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid"
     fi
