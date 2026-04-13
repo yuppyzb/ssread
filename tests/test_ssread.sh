@@ -760,3 +760,31 @@ source_ssread_functions() {
     cmd_new_session --root "~" 2>/dev/null || true
     [[ "$STATUS_MSG" != *"directory not found"* ]]
 }
+
+# ── Tests: SESSION_STATE (FSM) ────────────────────────────────────────────
+
+@test "state name constants are defined" {
+    source_ssread_functions
+    [[ "$STATE_STOPPED" == "stopped" ]]
+    [[ "$STATE_PENDING" == "pending" ]]
+    [[ "$STATE_IDLE"    == "idle" ]]
+    [[ "$STATE_WORKING" == "working" ]]
+    [[ "$STATE_DONE"    == "done" ]]
+    [[ "$STATE_CLOSED"  == "closed" ]]
+}
+
+@test "load_sessions populates SESSION_STATE parallel to SESSION_IDS" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    [[ "${#SESSION_STATE[@]}" -eq "$SESSION_COUNT" ]]
+}
+
+@test "load_sessions initializes SESSION_STATE entries to stopped" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        [[ "${SESSION_STATE[$i]}" == "$STATE_STOPPED" ]]
+    done
+}

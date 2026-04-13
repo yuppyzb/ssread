@@ -497,6 +497,16 @@ declare -a SESSION_CTX=()         # last context size in tokens
 declare -a SESSION_FORK_FROM=()   # parent session ID (short) if forked, empty otherwise
 declare -a SESSION_MODEL_SHORT=() # pre-computed short model name
 declare -a SESSION_CTX_SHORT=()   # pre-computed formatted token count
+declare -a SESSION_STATE=()       # FSM lifecycle state per session (see STATE_* constants below)
+
+# ── Session Lifecycle States (FSM) ────────────────────────────────────────
+# Single-axis enum; orthogonal flags (bookmark/archive/seen-working/attached) live elsewhere.
+readonly STATE_STOPPED="stopped"   # jsonl on disk, no tmux window
+readonly STATE_PENDING="pending"   # tmux window exists, jsonl not yet created
+readonly STATE_IDLE="idle"         # claude alive, no tool execution, never worked this lifecycle
+readonly STATE_WORKING="working"   # claude executing tools right now
+readonly STATE_DONE="done"         # was working, now idle (notification: review needed)
+readonly STATE_CLOSED="closed"     # tmux window present but claude process exited
 
 CTX_WARN_THRESHOLD=80000  # show ⚠ when context exceeds this
 
@@ -769,6 +779,7 @@ load_sessions() {
     SESSION_FORK_FROM=()
     SESSION_MODEL_SHORT=()
     SESSION_CTX_SHORT=()
+    SESSION_STATE=()
     SESSION_COUNT=0
     DETAIL_SID=""  # invalidate cached detail
 
@@ -867,6 +878,7 @@ load_sessions() {
         SESSION_FORK_FROM+=("$fork_from")
         SESSION_MODEL_SHORT+=("$(format_model_short "$model")")
         SESSION_CTX_SHORT+=("$(format_tokens "$ctx")")
+        SESSION_STATE+=("$STATE_STOPPED")  # initial; reconcile_sessions() upgrades to running states
 
         if [[ -n "$ts" && "$epoch" -gt 0 ]]; then
             SESSION_ELAPSED+=("$(format_elapsed "$epoch")")
@@ -1234,6 +1246,7 @@ search_sessions() {
     local -a new_FIRST_MSG=() new_CWDS=() new_EPOCH=()
     local -a new_MODELS=() new_CTX=() new_FORK_FROM=()
     local -a new_MODEL_SHORT=() new_CTX_SHORT=()
+    local -a new_STATE=()
 
     for (( x=0; x<count; x++ )); do
         local idx="${scored_indices[$x]}"
@@ -1252,6 +1265,7 @@ search_sessions() {
         new_FORK_FROM+=("${SESSION_FORK_FROM[$idx]}")
         new_MODEL_SHORT+=("${SESSION_MODEL_SHORT[$idx]}")
         new_CTX_SHORT+=("${SESSION_CTX_SHORT[$idx]}")
+        new_STATE+=("${SESSION_STATE[$idx]}")
     done
 
     SESSION_FILES=("${new_FILES[@]}")
@@ -1269,6 +1283,7 @@ search_sessions() {
     SESSION_FORK_FROM=("${new_FORK_FROM[@]}")
     SESSION_MODEL_SHORT=("${new_MODEL_SHORT[@]}")
     SESSION_CTX_SHORT=("${new_CTX_SHORT[@]}")
+    SESSION_STATE=("${new_STATE[@]}")
     SESSION_COUNT=$count
 }
 
