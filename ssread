@@ -253,7 +253,7 @@ pane_detach_current() {
     # Swap session back to its hidden window (placeholder returns to pane 2)
     tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:s:$sid_short.0" 2>/dev/null || true
     ATTACHED_SID=""
-    ACTIVE_WINDOWS_LAST_REFRESH=0
+    RECONCILE_LAST_RUN=0
 }
 
 pane_attach_session() {
@@ -281,7 +281,7 @@ pane_attach_session() {
     SEEN_WORKING_STR="${SEEN_WORKING_STR/"|${sid_short}|"/"|"}"
 
     # Force refresh so indicators update immediately
-    ACTIVE_WINDOWS_LAST_REFRESH=0
+    RECONCILE_LAST_RUN=0
 
     # Focus session pane
     tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
@@ -508,6 +508,26 @@ readonly STATE_WORKING="working"   # claude executing tools right now
 readonly STATE_DONE="done"         # was working, now idle (notification: review needed)
 readonly STATE_CLOSED="closed"     # tmux window present but claude process exited
 
+# Pure function: lifecycle state from snapshot inputs.
+# Args: has_jsonl has_window has_claude has_tools seen_working   (all 0/1)
+# Echoes one of: drop | orphan | <STATE_*>
+# (drop = should not appear in list; orphan = window without jsonl AND claude dead → cleanup)
+compute_state() {
+    local J=$1 W=$2 C=$3 T=$4 S=$5
+    if (( W == 0 )); then
+        if (( J == 0 )); then echo "drop"; else echo "$STATE_STOPPED"; fi
+        return
+    fi
+    if (( J == 0 )); then
+        if (( C == 0 )); then echo "orphan"; else echo "$STATE_PENDING"; fi
+        return
+    fi
+    if (( C == 0 )); then echo "$STATE_CLOSED"; return; fi
+    if (( T == 1 )); then echo "$STATE_WORKING"; return; fi
+    if (( S == 1 )); then echo "$STATE_DONE"; return; fi
+    echo "$STATE_IDLE"
+}
+
 CTX_WARN_THRESHOLD=80000  # show ⚠ when context exceeds this
 
 SESSION_COUNT=0
@@ -606,29 +626,34 @@ declare -a GROUP_STARTS=()
 declare -a GROUP_COUNTS=()
 GROUP_COUNT=0
 
-# Cache of active tmux window states (refreshed periodically)
-# Uses pane_current_command to detect actual process state:
-#   "claude" → session is working (show spinner)
-#   anything else (sleep/bash) → session is done (show ●)
-ACTIVE_WINDOWS_STR="|"    # all s:* windows
+# Lifecycle reconciliation: snapshot tmux + ps state, recompute SESSION_STATE[i].
+# Snapshot strings (ACTIVE_WINDOWS_STR / WORKING_WINDOWS_STR) are kept for callers
+# that still query them directly; Step 3 will retire those in favor of SESSION_STATE.
+ACTIVE_WINDOWS_STR="|"    # all s:* windows present this cycle
 ACTIVE_WINDOWS_COUNT=0
-WORKING_WINDOWS_STR="|"   # windows where claude is actively running tools
-SEEN_WORKING_STR="|"      # sessions that have been working at least once (for ● detection)
-ACTIVE_WINDOWS_LAST_REFRESH=0
+WORKING_WINDOWS_STR="|"   # windows where claude has tool children
+SEEN_WORKING_STR="|"      # sticky: sessions that worked at least once (for done detection)
+RECONCILE_LAST_RUN=0
+declare -a ORPHAN_WINDOWS=()   # populated by reconcile when a window has no jsonl + dead claude
 
-refresh_active_windows() {
+reconcile_sessions() {
     local now=${EPOCHSECONDS:-$(date +%s)}
-    if (( now - ACTIVE_WINDOWS_LAST_REFRESH < 2 )); then
+    if (( now - RECONCILE_LAST_RUN < 2 )); then
         return
     fi
     ACTIVE_WINDOWS_STR="|"
     ACTIVE_WINDOWS_COUNT=0
     WORKING_WINDOWS_STR="|"
+    ORPHAN_WINDOWS=()
+
+    # Tracks which window names had a live claude process this cycle.
+    # Format: |<sid_part>|<sid_part>|...
+    local live_claude_str="|"
+
     if [[ -n "${TMUX:-}" ]]; then
         local _tmux_out
         _tmux_out=$(tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name} #{pane_pid}' 2>/dev/null) || true
 
-        # Single ps call: get pid, ppid, comm for all processes
         local _ps_out
         _ps_out=$(ps -e -o pid=,ppid=,comm= 2>/dev/null) || true
 
@@ -639,17 +664,14 @@ refresh_active_windows() {
                 ACTIVE_WINDOWS_STR="${ACTIVE_WINDOWS_STR}${sid_part}|"
                 ACTIVE_WINDOWS_COUNT=$(( ACTIVE_WINDOWS_COUNT + 1 ))
 
-                # Find claude child of this pane's shell
                 local claude_pid
                 claude_pid=$(echo "$_ps_out" | awk -v pp="$pane_pid" '$2==pp && $3=="claude" {print $1; exit}')
                 if [[ -n "$claude_pid" ]]; then
-                    # Claude is running. Check if it has tool children (not npm/node)
-                    # to distinguish working (tool execution) from idle (prompt)
+                    live_claude_str="${live_claude_str}${sid_part}|"
                     local has_tools
                     has_tools=$(echo "$_ps_out" | awk -v pp="$claude_pid" '$2==pp && $3!="npm" && $3!="node" {found=1; exit} END {print found+0}')
                     if (( has_tools )); then
                         WORKING_WINDOWS_STR="${WORKING_WINDOWS_STR}${sid_part}|"
-                        # Track that this session has been working (for ● on completion)
                         if [[ "$SEEN_WORKING_STR" != *"|${sid_part}|"* ]]; then
                             SEEN_WORKING_STR="${SEEN_WORKING_STR}${sid_part}|"
                         fi
@@ -658,7 +680,40 @@ refresh_active_windows() {
             fi
         done <<< "$_tmux_out"
     fi
-    ACTIVE_WINDOWS_LAST_REFRESH=$now
+
+    # Recompute SESSION_STATE[i] from current snapshot.
+    # Every entry in SESSION_IDS came from a jsonl file (load_sessions), so J=1
+    # for now. Step 4 will introduce pending entries with J=0.
+    local i sid sid_short J W C T S state
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        sid="${SESSION_IDS[$i]}"
+        if [[ "$sid" == pending:* ]]; then
+            sid_short="${sid#pending:}"
+            J=0
+        else
+            sid_short="${sid:0:8}"
+            J=1
+        fi
+        if [[ "$ACTIVE_WINDOWS_STR" == *"|${sid_short}|"* ]]; then W=1; else W=0; fi
+        if [[ "$live_claude_str"    == *"|${sid_short}|"* ]]; then C=1; else C=0; fi
+        if [[ "$WORKING_WINDOWS_STR" == *"|${sid_short}|"* ]]; then T=1; else T=0; fi
+        if [[ "$SEEN_WORKING_STR"   == *"|${sid_short}|"* ]]; then S=1; else S=0; fi
+        state=$(compute_state "$J" "$W" "$C" "$T" "$S")
+        case "$state" in
+            drop|orphan)
+                # drop: handled in Step 4/5 (pending entries that lost their window)
+                # orphan: collect for caller cleanup; leave SESSION_STATE as-is for now
+                if [[ "$state" == "orphan" ]]; then
+                    ORPHAN_WINDOWS+=("$sid_short")
+                fi
+                ;;
+            *)
+                SESSION_STATE[$i]="$state"
+                ;;
+        esac
+    done
+
+    RECONCILE_LAST_RUN=$now
 }
 
 is_session_active() {
@@ -1879,7 +1934,7 @@ PREV_RIGHT_WIDTH=-1
 
 render() {
     get_dimensions
-    refresh_active_windows
+    reconcile_sessions
     SPINNER_IDX=$(( (SPINNER_IDX + 1) % 10 ))
     # Deferred auto-refresh: reload sessions after new/fork creates a session
     if (( REFRESH_AFTER_CYCLES > 0 )); then
@@ -2124,7 +2179,7 @@ handle_input() {
         r)
             SELECTED=0
             SCROLL_OFFSET=0
-            ACTIVE_WINDOWS_LAST_REFRESH=0
+            RECONCILE_LAST_RUN=0
             draw_loading
             load_sessions
             group_sessions

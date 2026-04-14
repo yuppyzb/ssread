@@ -788,3 +788,74 @@ source_ssread_functions() {
         [[ "${SESSION_STATE[$i]}" == "$STATE_STOPPED" ]]
     done
 }
+
+# ── Tests: compute_state truth table ──────────────────────────────────────
+# Args: has_jsonl has_window has_claude has_tools seen_working
+
+@test "compute_state: J=0 W=0 → drop" {
+    source_ssread_functions
+    [[ "$(compute_state 0 0 0 0 0)" == "drop" ]]
+}
+
+@test "compute_state: J=1 W=0 → stopped" {
+    source_ssread_functions
+    [[ "$(compute_state 1 0 0 0 0)" == "$STATE_STOPPED" ]]
+}
+
+@test "compute_state: J=0 W=1 C=1 → pending" {
+    source_ssread_functions
+    [[ "$(compute_state 0 1 1 0 0)" == "$STATE_PENDING" ]]
+}
+
+@test "compute_state: J=0 W=1 C=0 → orphan" {
+    source_ssread_functions
+    [[ "$(compute_state 0 1 0 0 0)" == "orphan" ]]
+}
+
+@test "compute_state: J=1 W=1 C=0 → closed" {
+    source_ssread_functions
+    [[ "$(compute_state 1 1 0 0 0)" == "$STATE_CLOSED" ]]
+    # closed regardless of seen_working
+    [[ "$(compute_state 1 1 0 0 1)" == "$STATE_CLOSED" ]]
+}
+
+@test "compute_state: J=1 W=1 C=1 T=1 → working" {
+    source_ssread_functions
+    [[ "$(compute_state 1 1 1 1 0)" == "$STATE_WORKING" ]]
+    # working regardless of seen_working
+    [[ "$(compute_state 1 1 1 1 1)" == "$STATE_WORKING" ]]
+}
+
+@test "compute_state: J=1 W=1 C=1 T=0 S=0 → idle" {
+    source_ssread_functions
+    [[ "$(compute_state 1 1 1 0 0)" == "$STATE_IDLE" ]]
+}
+
+@test "compute_state: J=1 W=1 C=1 T=0 S=1 → done" {
+    source_ssread_functions
+    [[ "$(compute_state 1 1 1 0 1)" == "$STATE_DONE" ]]
+}
+
+# ── Tests: reconcile_sessions integration ─────────────────────────────────
+
+@test "reconcile_sessions outside tmux leaves all entries as stopped" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    unset TMUX 2>/dev/null || true
+    load_sessions
+    reconcile_sessions
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        [[ "${SESSION_STATE[$i]}" == "$STATE_STOPPED" ]]
+    done
+}
+
+@test "reconcile_sessions can be called repeatedly without state corruption" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    unset TMUX 2>/dev/null || true
+    load_sessions
+    reconcile_sessions
+    reconcile_sessions
+    reconcile_sessions
+    [[ "${#SESSION_STATE[@]}" -eq "$SESSION_COUNT" ]]
+}
