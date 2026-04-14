@@ -927,6 +927,56 @@ JSONL
     [[ "${SESSION_IDS[$pending_idx]}" == "pending:${fake_epoch}" ]]
 }
 
+@test "load_sessions preserves pending entries across reload" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    local count_before=$SESSION_COUNT
+
+    # Add a pending entry
+    local fake_epoch=${EPOCHSECONDS:-$(date +%s)}
+    _insert_pending_entry "$fake_epoch" "/Users/test/project/myapp" "" ""
+
+    # Reload sessions — pending should survive
+    load_sessions
+    local found=false
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        if [[ "${SESSION_IDS[$i]}" == "pending:${fake_epoch}" ]]; then
+            found=true
+            break
+        fi
+    done
+    $found
+}
+
+@test "load_sessions drops pending entry when matching jsonl appears" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+
+    # Use epoch 1 second in the past so newly created file is strictly newer
+    local fake_epoch=$(( ${EPOCHSECONDS:-$(date +%s)} - 1 ))
+    _insert_pending_entry "$fake_epoch" "/Users/test/project/myapp" "" ""
+    # Override the auto-set epoch to match our past-second value
+    SESSION_EPOCH[$(( SESSION_COUNT - 1 ))]="$fake_epoch"
+
+    # Create a new jsonl — its file mtime (now) > fake_epoch (1 sec ago)
+    local new_sid="gggg7777-hhhh-iiii-jjjj-kkkkkkkkkkkk"
+    cat > "$MOCK_PROJECTS/-Users-test-project-myapp/${new_sid}.jsonl" <<JSONL
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"new session"},"uuid":"u99","timestamp":"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)","permissionMode":"default","userType":"external","entrypoint":"cli","cwd":"/Users/test/project/myapp","sessionId":"${new_sid}","version":"2.1.90"}
+JSONL
+
+    load_sessions
+    local found=false
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        if [[ "${SESSION_IDS[$i]}" == "pending:${fake_epoch}" ]]; then
+            found=true
+            break
+        fi
+    done
+    ! $found
+}
+
 # ── Tests: sid_to_win_key (window name computation) ──────────────────────
 
 @test "sid_to_win_key: regular sid returns first 8 chars" {

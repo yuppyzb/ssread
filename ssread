@@ -982,6 +982,34 @@ toggle_archive() {
 }
 
 load_sessions() {
+    # Save pending entries before reset — they have no jsonl yet, so
+    # load_sessions won't re-discover them from disk.
+    local -a _saved_pending_ids=() _saved_pending_files=() _saved_pending_elapsed=()
+    local -a _saved_pending_dirs=() _saved_pending_ts=() _saved_pending_projects=()
+    local -a _saved_pending_branches=() _saved_pending_cwds=() _saved_pending_epoch=()
+    local -a _saved_pending_msgs=() _saved_pending_models=() _saved_pending_ctx=()
+    local -a _saved_pending_fork=() _saved_pending_mshort=() _saved_pending_cshort=()
+    local _p
+    for (( _p=0; _p<SESSION_COUNT; _p++ )); do
+        if [[ "${SESSION_IDS[$_p]}" == pending:* ]]; then
+            _saved_pending_ids+=("${SESSION_IDS[$_p]}")
+            _saved_pending_files+=("${SESSION_FILES[$_p]}")
+            _saved_pending_elapsed+=("${SESSION_ELAPSED[$_p]}")
+            _saved_pending_dirs+=("${SESSION_DIRS[$_p]}")
+            _saved_pending_ts+=("${SESSION_TIMESTAMPS[$_p]}")
+            _saved_pending_projects+=("${SESSION_PROJECTS[$_p]}")
+            _saved_pending_branches+=("${SESSION_BRANCHES[$_p]}")
+            _saved_pending_cwds+=("${SESSION_CWDS[$_p]}")
+            _saved_pending_epoch+=("${SESSION_EPOCH[$_p]}")
+            _saved_pending_msgs+=("${SESSION_FIRST_MSG[$_p]}")
+            _saved_pending_models+=("${SESSION_MODELS[$_p]}")
+            _saved_pending_ctx+=("${SESSION_CTX[$_p]}")
+            _saved_pending_fork+=("${SESSION_FORK_FROM[$_p]}")
+            _saved_pending_mshort+=("${SESSION_MODEL_SHORT[$_p]}")
+            _saved_pending_cshort+=("${SESSION_CTX_SHORT[$_p]}")
+        fi
+    done
+
     SESSION_FILES=()
     SESSION_IDS=()
     SESSION_ELAPSED=()
@@ -1108,6 +1136,46 @@ load_sessions() {
     done < "$tmpfile"
 
     rm -f "$tmpfile"
+
+    # Restore saved pending entries (they have no jsonl, so weren't re-loaded)
+    local _r
+    for (( _r=0; _r<${#_saved_pending_ids[@]}; _r++ )); do
+        local _sid="${_saved_pending_ids[$_r]}"
+        # Skip if this pending entry was promoted (a real session appeared
+        # in the same cwd whose jsonl file was modified after the pending was created)
+        local _already=false _j
+        for (( _j=0; _j<SESSION_COUNT; _j++ )); do
+            [[ "${SESSION_IDS[$_j]}" == pending:* ]] && continue
+            [[ "${SESSION_CWDS[$_j]}" != "${_saved_pending_cwds[$_r]}" ]] && continue
+            local _file="${SESSION_FILES[$_j]}"
+            [[ -z "$_file" || ! -f "$_file" ]] && continue
+            local _mtime
+            _mtime=$(stat -f %m "$_file" 2>/dev/null || echo 0)
+            if (( _mtime > _saved_pending_epoch[_r] )); then
+                _already=true
+                break
+            fi
+        done
+        $_already && continue
+
+        SESSION_IDS+=("$_sid")
+        SESSION_FILES+=("${_saved_pending_files[$_r]}")
+        SESSION_ELAPSED+=("${_saved_pending_elapsed[$_r]}")
+        SESSION_DIRS+=("${_saved_pending_dirs[$_r]}")
+        SESSION_TIMESTAMPS+=("${_saved_pending_ts[$_r]}")
+        SESSION_PROJECTS+=("${_saved_pending_projects[$_r]}")
+        SESSION_BRANCHES+=("${_saved_pending_branches[$_r]}")
+        SESSION_CWDS+=("${_saved_pending_cwds[$_r]}")
+        SESSION_EPOCH+=("${_saved_pending_epoch[$_r]}")
+        SESSION_FIRST_MSG+=("${_saved_pending_msgs[$_r]}")
+        SESSION_MODELS+=("${_saved_pending_models[$_r]}")
+        SESSION_CTX+=("${_saved_pending_ctx[$_r]}")
+        SESSION_FORK_FROM+=("${_saved_pending_fork[$_r]}")
+        SESSION_MODEL_SHORT+=("${_saved_pending_mshort[$_r]}")
+        SESSION_CTX_SHORT+=("${_saved_pending_cshort[$_r]}")
+        SESSION_STATE+=("$STATE_PENDING")
+        SESSION_COUNT=$(( SESSION_COUNT + 1 ))
+    done
 }
 
 # ── Lazy Detail Loading ───────────────────────────────────────────────────
@@ -1543,6 +1611,10 @@ fork_session() {
     tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:$pane_win_name.0" 2>/dev/null || true
     ATTACHED_SID="pending:${win_key}"
     tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
+
+    # Rebuild display list so pending entry is immediately visible
+    group_sessions
+    build_display_list
     REFRESH_AFTER_CYCLES=2
 }
 
@@ -1656,6 +1728,10 @@ cmd_new_session() {
         ATTACHED_SID="pending:${win_key}"
         tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
     fi
+
+    # Rebuild display list so pending entry is immediately visible
+    group_sessions
+    build_display_list
 
     set_status_msg "New session launched in $root"
     REFRESH_AFTER_CYCLES=2
