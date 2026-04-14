@@ -343,7 +343,8 @@ setup_terminal() {
 }
 
 # Set up tmux key bindings for pane navigation within ssread session.
-# Ctrl+b 0 → focus pane 0 (list),  Ctrl+b Tab → toggle between panes
+# Ctrl+] toggles between list and session panes (no prefix needed).
+# Works in Korean IME mode and doesn't conflict with tmux defaults.
 setup_tmux_keybindings() {
     if [[ -z "${TMUX:-}" || -z "$TMUX_SESSION_NAME" ]]; then
         return
@@ -352,8 +353,8 @@ setup_tmux_keybindings() {
     tmux bind-key 0 select-pane -t "$TMUX_SESSION_NAME:list.0" 2>/dev/null || true
     # Bind prefix+Tab → toggle between panes (overrides last-window)
     tmux bind-key Tab last-pane 2>/dev/null || true
-    # Bind backtick (`) in root table — no prefix needed, single keypress to return to list
-    tmux bind-key -n '`' select-pane -t "$TMUX_SESSION_NAME:list.0" 2>/dev/null || true
+    # Bind Ctrl+] in root table — no prefix needed, single keypress to return to list
+    tmux bind-key -n C-] select-pane -t "$TMUX_SESSION_NAME:list.0" 2>/dev/null || true
 }
 
 # Restore default tmux key bindings
@@ -363,7 +364,7 @@ restore_tmux_keybindings() {
     fi
     tmux bind-key 0 select-window -t :0 2>/dev/null || true
     tmux bind-key Tab last-window 2>/dev/null || true
-    tmux unbind-key -n '`' 2>/dev/null || true
+    tmux unbind-key -n C-] 2>/dev/null || true
 }
 
 cleanup() {
@@ -2287,7 +2288,7 @@ draw_status_bar() {
         if [[ -n "$state_info" ]]; then
             state_info="${state_info}  │"
         fi
-        local bar_text="${state_info}"' j/k Nav  Enter: Open/Fold  b: Bookmark  a: Archive  `: List  /: Search  q: Quit'
+        local bar_text="${state_info}"' j/k Nav  Enter: Open/Fold  b: Bookmark  a: Archive  C-]: Toggle  /: Search  q: Quit'
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     fi
 }
@@ -2371,6 +2372,8 @@ read_key() {
         else
             _KEY="ESC"
         fi
+    elif [[ "$c" == $'\x1d' ]]; then
+        _KEY="C-]"
     elif [[ "$c" == $'\t' ]]; then
         _KEY="TAB"
     elif [[ "$c" == "" ]]; then
@@ -2488,7 +2491,7 @@ handle_input() {
                 fi
             fi
             ;;
-        TAB)
+        TAB|C-])
             if [[ -n "${TMUX:-}" && -n "$ATTACHED_SID" ]]; then
                 tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
             fi
