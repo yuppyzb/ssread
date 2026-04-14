@@ -177,13 +177,19 @@ write_detail_file() {
 
     {
         printf "${BOLD}${FG_YELLOW} Session${RESET}\n"
-        if is_session_working_at "$i"; then
-            printf " %s  ${FG_CYAN}${SPINNER_CHARS[$SPINNER_IDX]} working${RESET}\n" "$sid"
-        elif is_session_done_at "$i"; then
-            printf " %s  ${FG_YELLOW}● done${RESET}\n" "$sid"
-        else
-            printf " %s\n" "$sid"
-        fi
+        local state="${SESSION_STATE[$i]}"
+        case "$state" in
+            "$STATE_WORKING")
+                printf " %s  ${FG_CYAN}${SPINNER_CHARS[$SPINNER_IDX]} working${RESET}\n" "$sid" ;;
+            "$STATE_DONE")
+                printf " %s  ${FG_YELLOW}● done${RESET}\n" "$sid" ;;
+            "$STATE_PENDING")
+                printf " ${FG_GRAY}${SPINNER_CHARS[$SPINNER_IDX]} launching...${RESET}\n" ;;
+            "$STATE_CLOSED")
+                printf " %s  ${FG_GRAY}◌ closed${RESET}\n" "$sid" ;;
+            *)
+                printf " %s\n" "$sid" ;;
+        esac
         if is_bookmarked "$sid"; then
             printf " ${FG_YELLOW}★ bookmarked${RESET}\n"
         fi
@@ -1873,15 +1879,29 @@ draw_session_list() {
             local ctx_short="${SESSION_CTX_SHORT[$i]}"
             local first_msg="${SESSION_FIRST_MSG[$i]}"
 
-            # Status prefix (shown at the front of the line)
+            # Status prefix and style (per lifecycle state)
             local prefix="  "
             local prefix_style=""
-            if is_session_working_at "$i"; then
-                prefix="${SPINNER_CHARS[$SPINNER_IDX]} "
-                prefix_style="${FG_CYAN}"
-            elif is_session_done_at "$i"; then
-                prefix="● "
-                prefix_style="${FG_YELLOW}"
+            local state="${SESSION_STATE[$i]}"
+            case "$state" in
+                "$STATE_WORKING")
+                    prefix="${SPINNER_CHARS[$SPINNER_IDX]} "
+                    prefix_style="${FG_CYAN}" ;;
+                "$STATE_DONE")
+                    prefix="● "
+                    prefix_style="${FG_YELLOW}" ;;
+                "$STATE_PENDING")
+                    prefix="${SPINNER_CHARS[$SPINNER_IDX]} "
+                    prefix_style="${FG_GRAY}" ;;
+                "$STATE_CLOSED")
+                    prefix="◌ "
+                    prefix_style="${FG_GRAY}" ;;
+            esac
+
+            # Pending entries show "new" instead of raw sid
+            local sid_display="$sid_short"
+            if [[ "$state" == "$STATE_PENDING" ]]; then
+                sid_display="new"
             fi
 
             # Trailing marks (context warning, bookmark, fork)
@@ -1901,10 +1921,10 @@ draw_session_list() {
             local meta="${model_short} ${ctx_short}"
             local line1
             if (( d == SELECTED )); then
-                line1=$(printf " %s%-8s %-7s %s%s" "$prefix" "$sid_short" "$elapsed" "$meta" "$marks")
+                line1=$(printf " %s%-8s %-7s %s%s" "$prefix" "$sid_display" "$elapsed" "$meta" "$marks")
                 print_at_styled "$row" 2 "$LEFT_WIDTH" "${BOLD}${REV}${FG_WHITE}" "$line1"
             else
-                line1=$(printf " %s%-8s %-7s %s%s" "$prefix" "$sid_short" "$elapsed" "$meta" "$marks")
+                line1=$(printf " %s%-8s %-7s %s%s" "$prefix" "$sid_display" "$elapsed" "$meta" "$marks")
                 if [[ -n "$prefix_style" ]]; then
                     print_at_styled "$row" 2 "$LEFT_WIDTH" "$prefix_style" "$line1"
                 elif is_session_active_at "$i"; then
@@ -1950,6 +1970,7 @@ draw_detail_panel() {
     fi
 
     local sid="${SESSION_IDS[$i]}"
+    local state="${SESSION_STATE[$i]}"
     local project="${SESSION_PROJECTS[$i]}"
     local branch="${SESSION_BRANCHES[$i]}"
     local cwd="${SESSION_CWDS[$i]}"
@@ -1958,19 +1979,24 @@ draw_detail_panel() {
     local model="${SESSION_MODELS[$i]}"
     local ctx="${SESSION_CTX[$i]}"
 
-    # Lazy load detail for this session
+    # Lazy load detail for this session (no-op for pending — no file)
     load_session_detail "$i"
 
     # ── Header ──
     print_at_styled "$row" "$col" "$width" "${BOLD}${FG_YELLOW}" "  Session"
     row=$(( row + 1 ))
-    if is_session_working_at "$i"; then
-        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_CYAN}${SPINNER_CHARS[$SPINNER_IDX]} working"
-    elif is_session_done_at "$i"; then
-        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_YELLOW}● done"
-    else
-        print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid"
-    fi
+    case "$state" in
+        "$STATE_WORKING")
+            print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_CYAN}${SPINNER_CHARS[$SPINNER_IDX]} working" ;;
+        "$STATE_DONE")
+            print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_YELLOW}● done" ;;
+        "$STATE_PENDING")
+            print_at_styled "$row" "$col" "$width" "${FG_GRAY}" "  ${SPINNER_CHARS[$SPINNER_IDX]} launching..." ;;
+        "$STATE_CLOSED")
+            print_at_styled "$row" "$col" "$width" "${FG_GRAY}" "  $sid  ◌ closed" ;;
+        *)
+            print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid" ;;
+    esac
     row=$(( row + 2 ))
 
     # ── Metadata ──
