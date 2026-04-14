@@ -576,43 +576,51 @@ source_ssread_functions() {
     ! is_session_active "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 }
 
-@test "is_session_active returns true when window name matches" {
+@test "is_session_active returns true via sid lookup" {
     source_ssread_functions
-    ACTIVE_WINDOWS_STR="|aaaa1111|"
+    SESSION_IDS=("aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee")
+    SESSION_STATE=("$STATE_IDLE")
+    SESSION_COUNT=1
     is_session_active "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 }
 
-@test "is_session_active returns false for non-matching session" {
+@test "is_session_active returns false for stopped via sid lookup" {
     source_ssread_functions
-    ACTIVE_WINDOWS_STR="|aaaa1111|"
-    ! is_session_active "bbbb2222-cccc-dddd-eeee-ffffffffffff"
+    SESSION_IDS=("aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee")
+    SESSION_STATE=("$STATE_STOPPED")
+    SESSION_COUNT=1
+    ! is_session_active "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 }
 
-@test "is_session_working returns false when not in working set" {
+@test "is_session_working returns false when not working" {
     source_ssread_functions
-    WORKING_WINDOWS_STR="|"
+    SESSION_IDS=("aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee")
+    SESSION_STATE=("$STATE_IDLE")
+    SESSION_COUNT=1
     ! is_session_working "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 }
 
-@test "is_session_working returns true when claude is running" {
+@test "is_session_working returns true via sid lookup" {
     source_ssread_functions
-    WORKING_WINDOWS_STR="|aaaa1111|"
+    SESSION_IDS=("aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee")
+    SESSION_STATE=("$STATE_WORKING")
+    SESSION_COUNT=1
     is_session_working "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 }
 
-@test "is_session_done returns true when was working then stopped" {
+@test "is_session_done returns true via sid lookup" {
     source_ssread_functions
-    ACTIVE_WINDOWS_STR="|aaaa1111|"
-    WORKING_WINDOWS_STR="|"
-    SEEN_WORKING_STR="|aaaa1111|"
+    SESSION_IDS=("aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee")
+    SESSION_STATE=("$STATE_DONE")
+    SESSION_COUNT=1
     is_session_done "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 }
 
 @test "is_session_done returns false when still working" {
     source_ssread_functions
-    ACTIVE_WINDOWS_STR="|aaaa1111|"
-    WORKING_WINDOWS_STR="|aaaa1111|"
-    SEEN_WORKING_STR="|aaaa1111|"
+    SESSION_IDS=("aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee")
+    SESSION_STATE=("$STATE_WORKING")
+    SESSION_COUNT=1
     ! is_session_done "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 }
 
@@ -847,6 +855,58 @@ source_ssread_functions() {
     for (( i=0; i<SESSION_COUNT; i++ )); do
         [[ "${SESSION_STATE[$i]}" == "$STATE_STOPPED" ]]
     done
+}
+
+# ── Tests: is_session_*_at (index-based helpers) ─────────────────────────
+
+@test "is_session_working_at returns true when SESSION_STATE is working" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    SESSION_STATE[0]="$STATE_WORKING"
+    is_session_working_at 0
+}
+
+@test "is_session_working_at returns false when SESSION_STATE is idle" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    SESSION_STATE[0]="$STATE_IDLE"
+    ! is_session_working_at 0
+}
+
+@test "is_session_done_at returns true when SESSION_STATE is done" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    SESSION_STATE[0]="$STATE_DONE"
+    is_session_done_at 0
+}
+
+@test "is_session_done_at returns false when SESSION_STATE is working" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    SESSION_STATE[0]="$STATE_WORKING"
+    ! is_session_done_at 0
+}
+
+@test "is_session_active_at returns true for running states" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    for state in "$STATE_IDLE" "$STATE_WORKING" "$STATE_DONE" "$STATE_CLOSED" "$STATE_PENDING"; do
+        SESSION_STATE[0]="$state"
+        is_session_active_at 0
+    done
+}
+
+@test "is_session_active_at returns false for stopped" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    SESSION_STATE[0]="$STATE_STOPPED"
+    ! is_session_active_at 0
 }
 
 @test "reconcile_sessions can be called repeatedly without state corruption" {

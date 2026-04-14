@@ -177,9 +177,9 @@ write_detail_file() {
 
     {
         printf "${BOLD}${FG_YELLOW} Session${RESET}\n"
-        if is_session_working "$sid"; then
+        if is_session_working_at "$i"; then
             printf " %s  ${FG_CYAN}${SPINNER_CHARS[$SPINNER_IDX]} working${RESET}\n" "$sid"
-        elif is_session_done "$sid"; then
+        elif is_session_done_at "$i"; then
             printf " %s  ${FG_YELLOW}● done${RESET}\n" "$sid"
         else
             printf " %s\n" "$sid"
@@ -716,18 +716,30 @@ reconcile_sessions() {
     RECONCILE_LAST_RUN=$now
 }
 
+# ── Index-based state queries (O(1), used in render hot path) ─────────────
+is_session_active_at()  { [[ "${SESSION_STATE[$1]}" != "$STATE_STOPPED" ]]; }
+is_session_working_at() { [[ "${SESSION_STATE[$1]}" == "$STATE_WORKING" ]]; }
+is_session_done_at()    { [[ "${SESSION_STATE[$1]}" == "$STATE_DONE" ]]; }
+
+# ── Sid-based state queries (O(n) linear scan, for non-index call sites) ──
+_find_session_idx() {
+    local sid="$1" i
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        [[ "${SESSION_IDS[$i]}" == "$sid" ]] && echo "$i" && return
+    done
+    echo ""
+}
 is_session_active() {
-    [[ "$ACTIVE_WINDOWS_STR" == *"|${1:0:8}|"* ]]
+    local idx; idx=$(_find_session_idx "$1")
+    [[ -n "$idx" ]] && is_session_active_at "$idx"
 }
-
-# Session was working but now idle (task completed, needs review)
 is_session_done() {
-    [[ "$SEEN_WORKING_STR" == *"|${1:0:8}|"* && "$WORKING_WINDOWS_STR" != *"|${1:0:8}|"* ]]
+    local idx; idx=$(_find_session_idx "$1")
+    [[ -n "$idx" ]] && is_session_done_at "$idx"
 }
-
-# Session has a window and claude IS running
 is_session_working() {
-    [[ "$WORKING_WINDOWS_STR" == *"|${1:0:8}|"* ]]
+    local idx; idx=$(_find_session_idx "$1")
+    [[ -n "$idx" ]] && is_session_working_at "$idx"
 }
 
 extract_project_name() {
@@ -1713,10 +1725,10 @@ draw_session_list() {
             # Status prefix (shown at the front of the line)
             local prefix="  "
             local prefix_style=""
-            if is_session_working "${SESSION_IDS[$i]}"; then
+            if is_session_working_at "$i"; then
                 prefix="${SPINNER_CHARS[$SPINNER_IDX]} "
                 prefix_style="${FG_CYAN}"
-            elif is_session_done "${SESSION_IDS[$i]}"; then
+            elif is_session_done_at "$i"; then
                 prefix="● "
                 prefix_style="${FG_YELLOW}"
             fi
@@ -1744,7 +1756,7 @@ draw_session_list() {
                 line1=$(printf " %s%-8s %-7s %s%s" "$prefix" "$sid_short" "$elapsed" "$meta" "$marks")
                 if [[ -n "$prefix_style" ]]; then
                     print_at_styled "$row" 2 "$LEFT_WIDTH" "$prefix_style" "$line1"
-                elif is_session_active "${SESSION_IDS[$i]}"; then
+                elif is_session_active_at "$i"; then
                     print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_GREEN}" "$line1"
                 else
                     print_at_styled "$row" 2 "$LEFT_WIDTH" "${FG_WHITE}" "$line1"
@@ -1801,9 +1813,9 @@ draw_detail_panel() {
     # ── Header ──
     print_at_styled "$row" "$col" "$width" "${BOLD}${FG_YELLOW}" "  Session"
     row=$(( row + 1 ))
-    if is_session_working "$sid"; then
+    if is_session_working_at "$i"; then
         print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_CYAN}${SPINNER_CHARS[$SPINNER_IDX]} working"
-    elif is_session_done "$sid"; then
+    elif is_session_done_at "$i"; then
         print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid  ${FG_YELLOW}● done"
     else
         print_at_styled "$row" "$col" "$width" "${FG_WHITE}" "  $sid"
