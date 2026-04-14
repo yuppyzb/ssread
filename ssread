@@ -245,13 +245,25 @@ _ensure_session_window() {
 }
 
 # Swap pane 2 with a hidden session window (layout stays fixed)
+# Derive tmux window key from a session ID (regular or pending).
+# Regular sid: first 8 chars.  pending:<key>: the key portion.
+sid_to_win_key() {
+    local sid="$1"
+    if [[ "$sid" == pending:* ]]; then
+        echo "${sid#pending:}"
+    else
+        echo "${sid:0:8}"
+    fi
+}
+
 pane_detach_current() {
     if [[ -z "$ATTACHED_SID" ]]; then
         return
     fi
-    local sid_short="${ATTACHED_SID:0:8}"
+    local win_key
+    win_key=$(sid_to_win_key "$ATTACHED_SID")
     # Swap session back to its hidden window (placeholder returns to pane 2)
-    tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:s:$sid_short.0" 2>/dev/null || true
+    tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:s:$win_key.0" 2>/dev/null || true
     ATTACHED_SID=""
     RECONCILE_LAST_RUN=0
 }
@@ -259,7 +271,8 @@ pane_detach_current() {
 pane_attach_session() {
     local sid="$1"
     local cwd="$2"
-    local sid_short="${sid:0:8}"
+    local win_key
+    win_key=$(sid_to_win_key "$sid")
 
     # Already showing this session — just refocus
     if [[ "$ATTACHED_SID" == "$sid" ]]; then
@@ -270,15 +283,17 @@ pane_attach_session() {
     # Swap current session back to its hidden window
     pane_detach_current
 
-    # Ensure hidden window exists
-    _ensure_session_window "$sid" "$cwd"
+    # Pending sessions already have a window; only ensure for real sessions
+    if [[ "$sid" != pending:* ]]; then
+        _ensure_session_window "$sid" "$cwd"
+    fi
 
     # Swap placeholder (pane 2) with the session's hidden window
-    tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:s:$sid_short.0" 2>/dev/null || true
+    tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:s:$win_key.0" 2>/dev/null || true
     ATTACHED_SID="$sid"
 
     # Clear ● indicator — user is reviewing this session
-    SEEN_WORKING_STR="${SEEN_WORKING_STR/"|${sid_short}|"/"|"}"
+    SEEN_WORKING_STR="${SEEN_WORKING_STR/"|${win_key}|"/"|"}"
 
     # Force refresh so indicators update immediately
     RECONCILE_LAST_RUN=0

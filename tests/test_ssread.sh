@@ -927,6 +927,23 @@ JSONL
     [[ "${SESSION_IDS[$pending_idx]}" == "pending:${fake_epoch}" ]]
 }
 
+# ── Tests: sid_to_win_key (window name computation) ──────────────────────
+
+@test "sid_to_win_key: regular sid returns first 8 chars" {
+    source_ssread_functions
+    [[ "$(sid_to_win_key "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee")" == "aaaa1111" ]]
+}
+
+@test "sid_to_win_key: pending: prefix returns win_key" {
+    source_ssread_functions
+    [[ "$(sid_to_win_key "pending:1713088200")" == "1713088200" ]]
+}
+
+@test "sid_to_win_key: short sid returns as-is" {
+    source_ssread_functions
+    [[ "$(sid_to_win_key "abc")" == "abc" ]]
+}
+
 # ── Tests: SESSION_STATE (FSM) ────────────────────────────────────────────
 
 @test "state name constants are defined" {
