@@ -582,13 +582,22 @@ _insert_pending_entry() {
 # Scan for pending entries whose jsonl has appeared; promote them to real sids.
 # Called from reconcile_sessions each cycle.
 promote_pending_sessions() {
+    # Fast check: skip entirely if no pending entries exist (avoids all subshells)
+    local _has_pending=false _k
+    for (( _k=0; _k<SESSION_COUNT; _k++ )); do
+        if [[ "${SESSION_IDS[$_k]}" == pending:* ]]; then
+            _has_pending=true
+            break
+        fi
+    done
+    $_has_pending || return 0
+
     local i
     for (( i=0; i<SESSION_COUNT; i++ )); do
         [[ "${SESSION_IDS[$i]}" == pending:* ]] || continue
 
         local win_key="${SESSION_IDS[$i]#pending:}"
         local cwd="${SESSION_CWDS[$i]}"
-        local pending_epoch="${SESSION_EPOCH[$i]}"
 
         # Find the project directory matching this cwd
         local dir_key
@@ -596,7 +605,12 @@ promote_pending_sessions() {
         local proj_dir="${CLAUDE_PROJECTS_DIR}/${dir_key}"
         [[ -d "$proj_dir" ]] || continue
 
-        # Look for jsonl files newer than or equal to pending creation time
+        # Capture file list into variable (no process substitution fd leak)
+        local file_list
+        file_list=$(find "$proj_dir" -maxdepth 1 -name "*.jsonl" \
+            ! -path "*/subagents/*" -print 2>/dev/null | sort -r) || true
+        [[ -z "$file_list" ]] && continue
+
         local candidate sid_found="" file_found=""
         while IFS= read -r candidate; do
             [[ -z "$candidate" ]] && continue
@@ -613,17 +627,15 @@ promote_pending_sessions() {
             done
             $already_loaded && continue
 
-            # Verify cwd match inside the jsonl
+            # Verify cwd match — single jq call instead of grep|jq pipe
             local file_cwd
-            file_cwd=$(grep -m1 '"type":"user"' "$candidate" 2>/dev/null \
-                | jq -r '.cwd // ""' 2>/dev/null) || continue
+            file_cwd=$(jq -r 'select(.type=="user") | .cwd // empty' "$candidate" 2>/dev/null | head -1) || continue
             if [[ "$file_cwd" == "$cwd" ]]; then
                 sid_found="$fname"
                 file_found="$candidate"
                 break
             fi
-        done < <(find "$proj_dir" -maxdepth 1 -name "*.jsonl" -newer /dev/null \
-            ! -path "*/subagents/*" -print 2>/dev/null | sort -t/ -k1 -r)
+        done <<< "$file_list"
 
         [[ -z "$sid_found" ]] && continue
 
@@ -636,14 +648,13 @@ promote_pending_sessions() {
         SESSION_FILES[$i]="$file_found"
         SESSION_STATE[$i]="$STATE_STOPPED"  # reconcile_sessions will recalculate
 
-        # Reload metadata from jsonl
+        # Reload metadata from jsonl — single jq call for all fields
         local user_data
-        user_data=$(grep -m1 '"type":"user"' "$file_found" 2>/dev/null \
-            | jq -r '{
-                ts: (.timestamp // ""),
-                branch: (.gitBranch // ""),
-                msg: ((.message.content // "") | if type == "string" then . elif type == "array" then [.[] | select(.type == "text") | .text] | join(" ") else "" end | gsub("<[^>]+>"; "") | gsub("\\s+"; " ") | ltrimstr(" ") | .[0:100])
-            }' 2>/dev/null) || true
+        user_data=$(jq -r '[.[] | select(.type=="user")][0] | {
+            ts: (.timestamp // ""),
+            branch: (.gitBranch // ""),
+            msg: ((.message.content // "") | if type == "string" then . elif type == "array" then [.[] | select(.type == "text") | .text] | join(" ") else "" end | gsub("<[^>]+>"; "") | gsub("\\s+"; " ") | ltrimstr(" ") | .[0:100])
+        }' "$file_found" 2>/dev/null) || true
         if [[ -n "$user_data" ]]; then
             local ts branch msg
             ts=$(printf '%s' "$user_data" | jq -r '.ts')
