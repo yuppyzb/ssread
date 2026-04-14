@@ -842,6 +842,91 @@ source_ssread_functions() {
     [[ "${SESSION_STATE[$last_idx]}" == "$STATE_PENDING" ]]
 }
 
+# ── Tests: Promotion (pending → real sid) ─────────────────────────────────
+
+@test "promote_pending replaces pending sid with real sid" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    local count_before=$SESSION_COUNT
+
+    # Manually add a pending entry matching session 1's cwd
+    local fake_epoch=${EPOCHSECONDS:-$(date +%s)}
+    _insert_pending_entry "$fake_epoch" "/Users/test/project/myapp" "fix/login" ""
+    local pending_idx=$(( SESSION_COUNT - 1 ))
+    [[ "${SESSION_IDS[$pending_idx]}" == "pending:${fake_epoch}" ]]
+
+    # Now simulate jsonl discovery: create a NEW jsonl that matches the cwd+epoch
+    local new_sid="dddd4444-eeee-ffff-0000-111111111111"
+    cat > "$MOCK_PROJECTS/-Users-test-project-myapp/${new_sid}.jsonl" <<JSONL
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"test prompt"},"uuid":"u9","timestamp":"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)","permissionMode":"default","userType":"external","entrypoint":"cli","cwd":"/Users/test/project/myapp","sessionId":"${new_sid}","version":"2.1.90","gitBranch":"fix/login"}
+JSONL
+
+    # Promote should find the new jsonl and replace the pending entry
+    promote_pending_sessions
+    # The pending entry's sid should now be the real sid
+    [[ "${SESSION_IDS[$pending_idx]}" == "$new_sid" ]]
+}
+
+@test "promote_pending updates SESSION_STATE from pending to stopped" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+
+    local fake_epoch=${EPOCHSECONDS:-$(date +%s)}
+    _insert_pending_entry "$fake_epoch" "/Users/test/project/myapp" "" ""
+    local pending_idx=$(( SESSION_COUNT - 1 ))
+
+    local new_sid="eeee5555-ffff-0000-1111-222222222222"
+    cat > "$MOCK_PROJECTS/-Users-test-project-myapp/${new_sid}.jsonl" <<JSONL
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"hello"},"uuid":"u10","timestamp":"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)","permissionMode":"default","userType":"external","entrypoint":"cli","cwd":"/Users/test/project/myapp","sessionId":"${new_sid}","version":"2.1.90"}
+JSONL
+
+    promote_pending_sessions
+    # After promotion: state transitions to stopped (no tmux window in test env)
+    [[ "${SESSION_STATE[$pending_idx]}" == "$STATE_STOPPED" ]]
+}
+
+@test "promote_pending carries over SEEN_WORKING flag" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+
+    local fake_epoch=${EPOCHSECONDS:-$(date +%s)}
+    _insert_pending_entry "$fake_epoch" "/Users/test/project/myapp" "" ""
+    local win_key="$fake_epoch"
+
+    # Simulate that this pending session was seen working
+    SEEN_WORKING_STR="${SEEN_WORKING_STR}${win_key}|"
+
+    local new_sid="ffff6666-0000-1111-2222-333333333333"
+    local new_sid_short="${new_sid:0:8}"
+    cat > "$MOCK_PROJECTS/-Users-test-project-myapp/${new_sid}.jsonl" <<JSONL
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"work"},"uuid":"u11","timestamp":"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)","permissionMode":"default","userType":"external","entrypoint":"cli","cwd":"/Users/test/project/myapp","sessionId":"${new_sid}","version":"2.1.90"}
+JSONL
+
+    promote_pending_sessions
+    # SEEN_WORKING should now have the real sid_short, not the win_key
+    [[ "$SEEN_WORKING_STR" == *"|${new_sid_short}|"* ]]
+    [[ "$SEEN_WORKING_STR" != *"|${win_key}|"* ]]
+}
+
+@test "promote_pending ignores already-loaded sessions" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+
+    local fake_epoch=${EPOCHSECONDS:-$(date +%s)}
+    _insert_pending_entry "$fake_epoch" "/Users/test/project/myapp" "fix/login" ""
+    local pending_idx=$(( SESSION_COUNT - 1 ))
+
+    # Don't create any new jsonl — existing ones should NOT match
+    # because they were already loaded before the pending entry was created
+    promote_pending_sessions
+    # Should still be pending (no new jsonl to promote to)
+    [[ "${SESSION_IDS[$pending_idx]}" == "pending:${fake_epoch}" ]]
+}
+
 # ── Tests: SESSION_STATE (FSM) ────────────────────────────────────────────
 
 @test "state name constants are defined" {

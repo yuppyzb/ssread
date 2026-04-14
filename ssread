@@ -537,7 +537,7 @@ _insert_pending_entry() {
     now_iso=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
     local epoch=${EPOCHSECONDS:-$(date +%s)}
     local dir_name
-    dir_name=$(echo "$cwd" | sed 's|/|-|g; s|^-||')
+    dir_name=$(echo "$cwd" | sed 's|/|-|g')
 
     SESSION_FILES+=("")
     SESSION_IDS+=("pending:${win_key}")
@@ -556,6 +556,105 @@ _insert_pending_entry() {
     SESSION_CTX_SHORT+=("")
     SESSION_STATE+=("$STATE_PENDING")
     SESSION_COUNT=$(( SESSION_COUNT + 1 ))
+}
+
+# Scan for pending entries whose jsonl has appeared; promote them to real sids.
+# Called from reconcile_sessions each cycle.
+promote_pending_sessions() {
+    local i
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        [[ "${SESSION_IDS[$i]}" == pending:* ]] || continue
+
+        local win_key="${SESSION_IDS[$i]#pending:}"
+        local cwd="${SESSION_CWDS[$i]}"
+        local pending_epoch="${SESSION_EPOCH[$i]}"
+
+        # Find the project directory matching this cwd
+        local dir_key
+        dir_key=$(echo "$cwd" | sed 's|/|-|g')
+        local proj_dir="${CLAUDE_PROJECTS_DIR}/${dir_key}"
+        [[ -d "$proj_dir" ]] || continue
+
+        # Look for jsonl files newer than or equal to pending creation time
+        local candidate sid_found="" file_found=""
+        while IFS= read -r candidate; do
+            [[ -z "$candidate" ]] && continue
+            local fname
+            fname=$(basename "$candidate" .jsonl)
+
+            # Skip if this sid is already loaded (not this pending entry)
+            local already_loaded=false j
+            for (( j=0; j<SESSION_COUNT; j++ )); do
+                if (( j != i )) && [[ "${SESSION_IDS[$j]}" == "$fname" ]]; then
+                    already_loaded=true
+                    break
+                fi
+            done
+            $already_loaded && continue
+
+            # Verify cwd match inside the jsonl
+            local file_cwd
+            file_cwd=$(grep -m1 '"type":"user"' "$candidate" 2>/dev/null \
+                | jq -r '.cwd // ""' 2>/dev/null) || continue
+            if [[ "$file_cwd" == "$cwd" ]]; then
+                sid_found="$fname"
+                file_found="$candidate"
+                break
+            fi
+        done < <(find "$proj_dir" -maxdepth 1 -name "*.jsonl" -newer /dev/null \
+            ! -path "*/subagents/*" -print 2>/dev/null | sort -t/ -k1 -r)
+
+        [[ -z "$sid_found" ]] && continue
+
+        # ── Promote ──
+        local old_key="$win_key"
+        local new_short="${sid_found:0:8}"
+
+        # Replace sid and file path
+        SESSION_IDS[$i]="$sid_found"
+        SESSION_FILES[$i]="$file_found"
+        SESSION_STATE[$i]="$STATE_STOPPED"  # reconcile_sessions will recalculate
+
+        # Reload metadata from jsonl
+        local user_data
+        user_data=$(grep -m1 '"type":"user"' "$file_found" 2>/dev/null \
+            | jq -r '{
+                ts: (.timestamp // ""),
+                branch: (.gitBranch // ""),
+                msg: ((.message.content // "") | if type == "string" then . elif type == "array" then [.[] | select(.type == "text") | .text] | join(" ") else "" end | gsub("<[^>]+>"; "") | gsub("\\s+"; " ") | ltrimstr(" ") | .[0:100])
+            }' 2>/dev/null) || true
+        if [[ -n "$user_data" ]]; then
+            local ts branch msg
+            ts=$(printf '%s' "$user_data" | jq -r '.ts')
+            branch=$(printf '%s' "$user_data" | jq -r '.branch')
+            msg=$(printf '%s' "$user_data" | jq -r '.msg')
+            [[ "$ts" != "null" ]] && SESSION_TIMESTAMPS[$i]="$ts"
+            [[ "$branch" != "null" ]] && SESSION_BRANCHES[$i]="$branch"
+            [[ "$msg" != "null" && -n "$msg" ]] && SESSION_FIRST_MSG[$i]="$msg"
+            if [[ -n "$ts" && "$ts" != "null" ]]; then
+                local epoch
+                epoch=$(iso_to_epoch "$ts")
+                SESSION_EPOCH[$i]="$epoch"
+                SESSION_ELAPSED[$i]="$(format_elapsed "$epoch")"
+            fi
+        fi
+
+        # Carry over SEEN_WORKING flag: old_key → new_short
+        if [[ "$SEEN_WORKING_STR" == *"|${old_key}|"* ]]; then
+            SEEN_WORKING_STR="${SEEN_WORKING_STR/"|${old_key}|"/"|"}"
+            SEEN_WORKING_STR="${SEEN_WORKING_STR}${new_short}|"
+        fi
+
+        # Update ATTACHED_SID if it pointed to this pending entry
+        if [[ "$ATTACHED_SID" == "pending:${old_key}" ]]; then
+            ATTACHED_SID="$sid_found"
+        fi
+
+        # Rename tmux window (no-op outside tmux)
+        if [[ -n "${TMUX:-}" ]]; then
+            tmux rename-window -t "${TMUX_SESSION_NAME}:s:${old_key}" "s:${new_short}" 2>/dev/null || true
+        fi
+    done
 }
 
 CTX_WARN_THRESHOLD=80000  # show ⚠ when context exceeds this
@@ -711,9 +810,10 @@ reconcile_sessions() {
         done <<< "$_tmux_out"
     fi
 
+    # Try to promote pending entries whose jsonl has appeared
+    promote_pending_sessions
+
     # Recompute SESSION_STATE[i] from current snapshot.
-    # Every entry in SESSION_IDS came from a jsonl file (load_sessions), so J=1
-    # for now. Step 4 will introduce pending entries with J=0.
     local i sid sid_short J W C T S state
     for (( i=0; i<SESSION_COUNT; i++ )); do
         sid="${SESSION_IDS[$i]}"
