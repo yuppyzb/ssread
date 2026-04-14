@@ -1334,6 +1334,7 @@ group_sessions() {
     local -a nw_FIRST_MSG=() nw_CWDS=() nw_EPOCH=()
     local -a nw_MODELS=() nw_CTX=() nw_FORK_FROM=()
     local -a nw_MODEL_SHORT=() nw_CTX_SHORT=()
+    local -a nw_STATE=()
 
     for idx in "${order[@]}"; do
         nw_FILES+=("${SESSION_FILES[$idx]}")
@@ -1351,6 +1352,7 @@ group_sessions() {
         nw_FORK_FROM+=("${SESSION_FORK_FROM[$idx]}")
         nw_MODEL_SHORT+=("${SESSION_MODEL_SHORT[$idx]}")
         nw_CTX_SHORT+=("${SESSION_CTX_SHORT[$idx]}")
+        nw_STATE+=("${SESSION_STATE[$idx]}")
     done
 
     SESSION_FILES=("${nw_FILES[@]}")
@@ -1368,6 +1370,7 @@ group_sessions() {
     SESSION_FORK_FROM=("${nw_FORK_FROM[@]}")
     SESSION_MODEL_SHORT=("${nw_MODEL_SHORT[@]}")
     SESSION_CTX_SHORT=("${nw_CTX_SHORT[@]}")
+    SESSION_STATE=("${nw_STATE[@]}")
 }
 
 # ── Search with BM25 scoring ──────────────────────────────────────────────
@@ -1613,8 +1616,8 @@ fork_session() {
     tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
 
     # Rebuild display list so pending entry is immediately visible
-    group_sessions
-    build_display_list
+    group_sessions || true
+    build_display_list || true
     REFRESH_AFTER_CYCLES=2
 }
 
@@ -1730,8 +1733,8 @@ cmd_new_session() {
     fi
 
     # Rebuild display list so pending entry is immediately visible
-    group_sessions
-    build_display_list
+    group_sessions || true
+    build_display_list || true
 
     set_status_msg "New session launched in $root"
     REFRESH_AFTER_CYCLES=2
@@ -1776,7 +1779,7 @@ execute_command() {
 
     case "$cmd" in
         new)
-            cmd_new_session "${args[@]+"${args[@]}"}"
+            cmd_new_session "${args[@]+"${args[@]}"}" || true
             ;;
         *)
             set_status_msg "Unknown command: $cmd"
