@@ -102,6 +102,24 @@ tmux_find_session_window() {
         done
 }
 
+# Kill a single session's hidden tmux window.
+# If the session is currently attached in pane 2, detach it first.
+tmux_kill_session_window() {
+    local sid="$1"
+    [[ -z "${TMUX:-}" ]] && return
+
+    # Detach if currently shown in pane 2
+    if [[ "$ATTACHED_SID" == "$sid" ]]; then
+        pane_detach_current
+    fi
+
+    local win_key
+    win_key=$(sid_to_win_key "$sid")
+    tmux kill-window -t "$TMUX_SESSION_NAME:s:$win_key" 2>/dev/null || true
+    # Clear working indicators
+    SEEN_WORKING_STR="${SEEN_WORKING_STR/"|${win_key}|"/"|"}"
+}
+
 # Kill all claude windows (not the list window)
 tmux_kill_all_sessions() {
     if [[ -z "${TMUX:-}" ]]; then
@@ -549,6 +567,35 @@ compute_state() {
     echo "$STATE_IDLE"
 }
 
+# Detect working state from jsonl file content.
+# A session is "working" when the last assistant message has stop_reason == "tool_use"
+# AND the file was recently modified (within JSONL_WORKING_THRESHOLD seconds).
+# This is far more reliable than ps-based tool child detection which produces false
+# positives from MCP handshakes, git probes, and other internal Claude processes.
+JSONL_WORKING_THRESHOLD=10
+
+_jsonl_is_working() {
+    local filepath="$1"
+    [[ -z "$filepath" || ! -f "$filepath" ]] && return 1
+
+    # Check mtime freshness first (cheap stat syscall)
+    local mtime now age
+    mtime=$(stat -f %m "$filepath" 2>/dev/null) || return 1
+    now=${EPOCHSECONDS:-$(date +%s)}
+    age=$(( now - mtime ))
+    if (( age > JSONL_WORKING_THRESHOLD )); then
+        return 1
+    fi
+
+    # File is fresh — check last assistant message's stop_reason.
+    # Read last ~20 lines and find the last assistant entry.
+    local stop_reason
+    stop_reason=$(tail -20 "$filepath" 2>/dev/null \
+        | jq -r 'select(.type=="assistant") | .message.stop_reason // empty' 2>/dev/null \
+        | tail -1)
+    [[ "$stop_reason" == "tool_use" ]]
+}
+
 # Insert a pending entry into SESSION_* arrays.
 # Args: win_key cwd [branch] [first_msg]
 # win_key is the epoch-based key used in both the synthetic sid and tmux window name.
@@ -808,7 +855,6 @@ reconcile_sessions() {
     ORPHAN_WINDOWS=()
 
     # Tracks which window names had a live claude process this cycle.
-    # Format: |<sid_part>|<sid_part>|...
     local live_claude_str="|"
 
     if [[ -n "${TMUX:-}" ]]; then
@@ -829,14 +875,6 @@ reconcile_sessions() {
                 claude_pid=$(echo "$_ps_out" | awk -v pp="$pane_pid" '$2==pp && $3=="claude" {print $1; exit}')
                 if [[ -n "$claude_pid" ]]; then
                     live_claude_str="${live_claude_str}${sid_part}|"
-                    local has_tools
-                    has_tools=$(echo "$_ps_out" | awk -v pp="$claude_pid" '$2==pp && $3!="npm" && $3!="node" {found=1; exit} END {print found+0}')
-                    if (( has_tools )); then
-                        WORKING_WINDOWS_STR="${WORKING_WINDOWS_STR}${sid_part}|"
-                        if [[ "$SEEN_WORKING_STR" != *"|${sid_part}|"* ]]; then
-                            SEEN_WORKING_STR="${SEEN_WORKING_STR}${sid_part}|"
-                        fi
-                    fi
                 fi
             fi
         done <<< "$_tmux_out"
@@ -846,6 +884,9 @@ reconcile_sessions() {
     promote_pending_sessions
 
     # Recompute SESSION_STATE[i] from current snapshot.
+    # Tool detection uses jsonl file content (last assistant stop_reason + mtime)
+    # instead of ps-based child process scanning, which produced false positives
+    # from MCP handshakes, git probes, and other internal Claude processes.
     local i sid sid_short J W C T S state
     for (( i=0; i<SESSION_COUNT; i++ )); do
         sid="${SESSION_IDS[$i]}"
@@ -858,13 +899,23 @@ reconcile_sessions() {
         fi
         if [[ "$ACTIVE_WINDOWS_STR" == *"|${sid_short}|"* ]]; then W=1; else W=0; fi
         if [[ "$live_claude_str"    == *"|${sid_short}|"* ]]; then C=1; else C=0; fi
-        if [[ "$WORKING_WINDOWS_STR" == *"|${sid_short}|"* ]]; then T=1; else T=0; fi
-        if [[ "$SEEN_WORKING_STR"   == *"|${sid_short}|"* ]]; then S=1; else S=0; fi
+
+        # T (has_tools): only check jsonl for sessions with a live window + claude
+        T=0
+        if (( W == 1 && C == 1 && J == 1 )); then
+            if _jsonl_is_working "${SESSION_FILES[$i]}"; then
+                T=1
+                WORKING_WINDOWS_STR="${WORKING_WINDOWS_STR}${sid_short}|"
+                if [[ "$SEEN_WORKING_STR" != *"|${sid_short}|"* ]]; then
+                    SEEN_WORKING_STR="${SEEN_WORKING_STR}${sid_short}|"
+                fi
+            fi
+        fi
+
+        if [[ "$SEEN_WORKING_STR" == *"|${sid_short}|"* ]]; then S=1; else S=0; fi
         state=$(compute_state "$J" "$W" "$C" "$T" "$S")
         case "$state" in
             drop|orphan)
-                # drop: handled in Step 4/5 (pending entries that lost their window)
-                # orphan: collect for caller cleanup; leave SESSION_STATE as-is for now
                 if [[ "$state" == "orphan" ]]; then
                     ORPHAN_WINDOWS+=("$sid_short")
                 fi
@@ -874,6 +925,20 @@ reconcile_sessions() {
                 ;;
         esac
     done
+
+    # Clean up orphan windows (no jsonl + claude dead) and closed windows (claude exited)
+    if [[ -n "${TMUX:-}" ]]; then
+        for sid_short in "${ORPHAN_WINDOWS[@]}"; do
+            tmux kill-window -t "$TMUX_SESSION_NAME:s:$sid_short" 2>/dev/null || true
+            SEEN_WORKING_STR="${SEEN_WORKING_STR/"|${sid_short}|"/"|"}"
+            # Detach if this was the attached session
+            local _wk
+            _wk=$(sid_to_win_key "${ATTACHED_SID:-}")
+            if [[ "$_wk" == "$sid_short" ]]; then
+                ATTACHED_SID=""
+            fi
+        done
+    fi
 
     RECONCILE_LAST_RUN=$now
 }
@@ -2448,7 +2513,12 @@ handle_input() {
             local _si
             _si=$(selected_session_idx)
             if [[ -n "$_si" ]]; then
-                toggle_archive "${SESSION_IDS[$_si]}"
+                local _sid="${SESSION_IDS[$_si]}"
+                # Kill tmux window when archiving (not when unarchiving)
+                if ! is_archived "$_sid"; then
+                    tmux_kill_session_window "$_sid"
+                fi
+                toggle_archive "$_sid"
                 group_sessions
                 build_display_list
             fi
