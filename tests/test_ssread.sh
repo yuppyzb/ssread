@@ -944,6 +944,26 @@ JSONL
     [[ "$(sid_to_win_key "abc")" == "abc" ]]
 }
 
+# ── Tests: state_counts ───────────────────────────────────────────────────
+
+@test "state_counts returns correct pending and done counts" {
+    source_ssread_functions
+    SESSION_STATE=("$STATE_STOPPED" "$STATE_PENDING" "$STATE_WORKING" "$STATE_DONE" "$STATE_DONE" "$STATE_CLOSED" "$STATE_PENDING")
+    SESSION_COUNT=7
+    state_counts
+    [[ "$STATE_PENDING_COUNT" -eq 2 ]]
+    [[ "$STATE_DONE_COUNT" -eq 2 ]]
+}
+
+@test "state_counts returns zero when no pending or done" {
+    source_ssread_functions
+    SESSION_STATE=("$STATE_STOPPED" "$STATE_IDLE" "$STATE_WORKING")
+    SESSION_COUNT=3
+    state_counts
+    [[ "$STATE_PENDING_COUNT" -eq 0 ]]
+    [[ "$STATE_DONE_COUNT" -eq 0 ]]
+}
+
 # ── Tests: SESSION_STATE (FSM) ────────────────────────────────────────────
 
 @test "state name constants are defined" {

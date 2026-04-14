@@ -2089,6 +2089,21 @@ draw_detail_panel() {
     done
 }
 
+# Compute per-state counts from SESSION_STATE (sets global vars).
+STATE_PENDING_COUNT=0
+STATE_DONE_COUNT=0
+state_counts() {
+    STATE_PENDING_COUNT=0
+    STATE_DONE_COUNT=0
+    local i
+    for (( i=0; i<SESSION_COUNT; i++ )); do
+        case "${SESSION_STATE[$i]}" in
+            "$STATE_PENDING") STATE_PENDING_COUNT=$(( STATE_PENDING_COUNT + 1 )) ;;
+            "$STATE_DONE")    STATE_DONE_COUNT=$(( STATE_DONE_COUNT + 1 )) ;;
+        esac
+    done
+}
+
 draw_status_bar() {
     local bar_row=$TERM_ROWS
     move_to "$bar_row" 1
@@ -2106,7 +2121,18 @@ draw_status_bar() {
         local bar_text=" ↑↓ Navigate  Enter: Open  Esc: Clear search  /: New search  r: Refresh"
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     else
-        local bar_text=' j/k Nav  Enter: Open/Fold  b: Bookmark  a: Archive  `: List  /: Search  q: Quit'
+        # Build state indicator prefix
+        local state_info=""
+        if (( STATE_PENDING_COUNT > 0 )); then
+            state_info="${state_info} ⋯${STATE_PENDING_COUNT} pending"
+        fi
+        if (( STATE_DONE_COUNT > 0 )); then
+            state_info="${state_info} ●${STATE_DONE_COUNT} done"
+        fi
+        if [[ -n "$state_info" ]]; then
+            state_info="${state_info}  │"
+        fi
+        local bar_text="${state_info}"' j/k Nav  Enter: Open/Fold  b: Bookmark  a: Archive  `: List  /: Search  q: Quit'
         printf "${BG_DARK}${FG_WHITE}%-${TERM_COLS}s${RESET}" "$bar_text"
     fi
 }
@@ -2124,6 +2150,7 @@ PREV_RIGHT_WIDTH=-1
 render() {
     get_dimensions
     reconcile_sessions
+    state_counts
     SPINNER_IDX=$(( (SPINNER_IDX + 1) % 10 ))
     # Deferred auto-refresh: reload sessions after new/fork creates a session
     if (( REFRESH_AFTER_CYCLES > 0 )); then
