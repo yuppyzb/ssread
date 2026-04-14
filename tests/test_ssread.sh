@@ -769,6 +769,79 @@ source_ssread_functions() {
     [[ "$STATUS_MSG" != *"directory not found"* ]]
 }
 
+# ── Tests: Pending entry insertion ────────────────────────────────────────
+
+@test "cmd_new_session inserts pending entry into SESSION_* arrays" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    local count_before=$SESSION_COUNT
+    unset TMUX 2>/dev/null || true
+    claude() { echo "stub"; }
+    export -f claude 2>/dev/null || true
+    ORIG_STTY=""
+    cmd_new_session --root "$TEST_DIR" 2>/dev/null || true
+    # Should have one more entry
+    [[ "$SESSION_COUNT" -eq $(( count_before + 1 )) ]]
+}
+
+@test "cmd_new_session pending entry has pending: sid prefix" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    local count_before=$SESSION_COUNT
+    unset TMUX 2>/dev/null || true
+    claude() { echo "stub"; }
+    export -f claude 2>/dev/null || true
+    ORIG_STTY=""
+    cmd_new_session --root "$TEST_DIR" 2>/dev/null || true
+    # Last entry should have pending: prefix
+    local last_idx=$(( SESSION_COUNT - 1 ))
+    [[ "${SESSION_IDS[$last_idx]}" == pending:* ]]
+}
+
+@test "cmd_new_session pending entry state is pending" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    unset TMUX 2>/dev/null || true
+    claude() { echo "stub"; }
+    export -f claude 2>/dev/null || true
+    ORIG_STTY=""
+    cmd_new_session --root "$TEST_DIR" 2>/dev/null || true
+    local last_idx=$(( SESSION_COUNT - 1 ))
+    [[ "${SESSION_STATE[$last_idx]}" == "$STATE_PENDING" ]]
+}
+
+@test "cmd_new_session pending entry stores correct cwd" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    unset TMUX 2>/dev/null || true
+    claude() { echo "stub"; }
+    export -f claude 2>/dev/null || true
+    ORIG_STTY=""
+    cmd_new_session --root "$TEST_DIR" 2>/dev/null || true
+    local last_idx=$(( SESSION_COUNT - 1 ))
+    [[ "${SESSION_CWDS[$last_idx]}" == "$TEST_DIR" ]]
+}
+
+@test "fork_session inserts pending entry" {
+    source_ssread_functions
+    CLAUDE_PROJECTS_DIR="$MOCK_PROJECTS"
+    load_sessions
+    local count_before=$SESSION_COUNT
+    unset TMUX 2>/dev/null || true
+    claude() { echo "stub"; }
+    export -f claude 2>/dev/null || true
+    ORIG_STTY=""
+    fork_session 0 2>/dev/null || true
+    [[ "$SESSION_COUNT" -eq $(( count_before + 1 )) ]]
+    local last_idx=$(( SESSION_COUNT - 1 ))
+    [[ "${SESSION_IDS[$last_idx]}" == pending:* ]]
+    [[ "${SESSION_STATE[$last_idx]}" == "$STATE_PENDING" ]]
+}
+
 # ── Tests: SESSION_STATE (FSM) ────────────────────────────────────────────
 
 @test "state name constants are defined" {

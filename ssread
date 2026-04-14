@@ -528,6 +528,36 @@ compute_state() {
     echo "$STATE_IDLE"
 }
 
+# Insert a pending entry into SESSION_* arrays.
+# Args: win_key cwd [branch] [first_msg]
+# win_key is the epoch-based key used in both the synthetic sid and tmux window name.
+_insert_pending_entry() {
+    local win_key="$1" cwd="$2" branch="${3:-}" first_msg="${4:-}"
+    local now_iso
+    now_iso=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+    local epoch=${EPOCHSECONDS:-$(date +%s)}
+    local dir_name
+    dir_name=$(echo "$cwd" | sed 's|/|-|g; s|^-||')
+
+    SESSION_FILES+=("")
+    SESSION_IDS+=("pending:${win_key}")
+    SESSION_ELAPSED+=("now")
+    SESSION_DIRS+=("$dir_name")
+    SESSION_TIMESTAMPS+=("$now_iso")
+    SESSION_PROJECTS+=("$(extract_project_name "$dir_name")")
+    SESSION_BRANCHES+=("$branch")
+    SESSION_CWDS+=("$cwd")
+    SESSION_EPOCH+=("$epoch")
+    SESSION_FIRST_MSG+=("${first_msg:-⋯ launching...}")
+    SESSION_MODELS+=("")
+    SESSION_CTX+=("0")
+    SESSION_FORK_FROM+=("")
+    SESSION_MODEL_SHORT+=("")
+    SESSION_CTX_SHORT+=("")
+    SESSION_STATE+=("$STATE_PENDING")
+    SESSION_COUNT=$(( SESSION_COUNT + 1 ))
+}
+
 CTX_WARN_THRESHOLD=80000  # show ⚠ when context exceeds this
 
 SESSION_COUNT=0
@@ -1366,6 +1396,11 @@ fork_session() {
         cd_cmd="cd $(printf '%q' "$cwd") && "
     fi
 
+    # Epoch-based key for pending entry + tmux window name
+    local win_key=${EPOCHSECONDS:-$(date +%s)}
+    local first_msg="${SESSION_FIRST_MSG[$idx]:-}"
+    _insert_pending_entry "$win_key" "$cwd" "" "⑂${parent_sid_short} ${first_msg:0:80}"
+
     if [[ -z "${TMUX:-}" ]]; then
         # Non-tmux fallback: direct launch
         tput rmcup; tput cnorm
@@ -1381,11 +1416,11 @@ fork_session() {
     fi
 
     pane_detach_current
-    local win_name="s:f${parent_sid_short}"
-    tmux new-window -d -t "$TMUX_SESSION_NAME" -n "$win_name" \
+    local pane_win_name="s:${win_key}"
+    tmux new-window -d -t "$TMUX_SESSION_NAME" -n "$pane_win_name" \
         "${cd_cmd}claude --resume '${parent_sid}' --fork-session; trap '' INT HUP; tput civis 2>/dev/null; printf '\\033[H\\033[2J\\n\\033[90m  No session attached\\n\\n  Press Enter on a session to attach\\033[0m'; tmux select-pane -t '${TMUX_SESSION_NAME}:list.0' 2>/dev/null; while true; do sleep 86400; done"
-    tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:$win_name.0" 2>/dev/null || true
-    ATTACHED_SID="fork:${parent_sid_short}"
+    tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:$pane_win_name.0" 2>/dev/null || true
+    ATTACHED_SID="pending:${win_key}"
     tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
     REFRESH_AFTER_CYCLES=2
 }
@@ -1469,10 +1504,12 @@ cmd_new_session() {
         claude_cmd="claude \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
     fi
 
-    local win_name="new"
-    if [[ -n "$branch" ]]; then
-        win_name="${branch:0:16}"
-    fi
+    # Epoch-based key for pending entry + tmux window name
+    local win_key=${EPOCHSECONDS:-$(date +%s)}
+
+    # Insert pending entry into session list (visible before jsonl is created)
+    local pending_msg="${prompt:+$prompt}"
+    _insert_pending_entry "$win_key" "$root" "$branch" "${pending_msg:0:100}"
 
     if [[ -z "${TMUX:-}" ]]; then
         tput rmcup; tput cnorm
@@ -1491,16 +1528,15 @@ cmd_new_session() {
         clear_screen
     else
         pane_detach_current
-        local pane_win_name="s:${win_name}"
+        local pane_win_name="s:${win_key}"
         tmux new-window -d -t "$TMUX_SESSION_NAME" -n "$pane_win_name" \
             "${cd_cmd}${branch_cmd}${claude_cmd}; trap '' INT HUP; tput civis 2>/dev/null; printf '\\033[H\\033[2J\\n\\033[90m  No session attached\\n\\n  Press Enter on a session to attach\\033[0m'; tmux select-pane -t '${TMUX_SESSION_NAME}:list.0' 2>/dev/null; while true; do sleep 86400; done"
         tmux swap-pane -s "$TMUX_SESSION_NAME:list.2" -t "$TMUX_SESSION_NAME:$pane_win_name.0" 2>/dev/null || true
-        ATTACHED_SID="new:${win_name}"
+        ATTACHED_SID="pending:${win_key}"
         tmux select-pane -t "$TMUX_SESSION_NAME:list.2" 2>/dev/null || true
     fi
 
     set_status_msg "New session launched in $root"
-    # Defer session list reload — Claude needs time to create the .jsonl file
     REFRESH_AFTER_CYCLES=2
 }
 
