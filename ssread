@@ -590,10 +590,12 @@ _jsonl_is_working() {
 
     # File is fresh — check last assistant message's stop_reason.
     # Read last ~20 lines and find the last assistant entry.
+    # The || true guards against pipefail+set -e: jq may hit an incomplete
+    # line being actively written, returning exit code 5 (parse error).
     local stop_reason
     stop_reason=$(tail -20 "$filepath" 2>/dev/null \
         | jq -r 'select(.type=="assistant") | .message.stop_reason // empty' 2>/dev/null \
-        | tail -1)
+        | tail -1) || true
     [[ "$stop_reason" == "tool_use" ]]
 }
 

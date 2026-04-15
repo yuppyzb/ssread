@@ -1247,3 +1247,15 @@ JSONL
     touch "$f"
     ! _jsonl_is_working "$f"
 }
+
+@test "_jsonl_is_working survives truncated json line (active write)" {
+    source_ssread_functions
+    local f="$TEST_DIR/truncated.jsonl"
+    cat > "$f" <<'JSONL'
+{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}
+{"type":"user","message":{"role":"user","con
+JSONL
+    touch "$f"
+    # Must not crash under set -eo pipefail; returns false (incomplete data)
+    _jsonl_is_working "$f" || true
+}
