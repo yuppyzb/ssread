@@ -930,7 +930,7 @@ reconcile_sessions() {
     done
 
     # Clean up orphan windows (no jsonl + claude dead) and closed windows (claude exited)
-    if [[ -n "${TMUX:-}" ]]; then
+    if [[ -n "${TMUX:-}" ]] && (( ${#ORPHAN_WINDOWS[@]} > 0 )); then
         for sid_short in "${ORPHAN_WINDOWS[@]}"; do
             tmux kill-window -t "$TMUX_SESSION_NAME:s:$sid_short" 2>/dev/null || true
             SEEN_WORKING_STR="${SEEN_WORKING_STR/"|${sid_short}|"/"|"}"
@@ -2616,6 +2616,24 @@ main() {
 
     # Bootstrap into tmux if not already inside
     ensure_tmux_session "$@"
+
+    # ── Debug logging (remove after diagnosis) ──
+    _DBG="/tmp/ssread_debug_$$.log"
+    _dbg() { echo "[$(date +%H:%M:%S)] $*" >> "$_DBG"; }
+    _dbg "=== ssread start (pid=$$) ==="
+
+    # ERR trap — log the exact line/command that triggers set -e
+    _err_trap() {
+        local exit_code=$?
+        echo "ERR trap: line=${BASH_LINENO[0]} cmd=${BASH_COMMAND} rc=${exit_code}" >> "$_DBG"
+        echo "  call stack:" >> "$_DBG"
+        local frame=0
+        while caller $frame >> "$_DBG" 2>/dev/null; do
+            frame=$((frame + 1))
+        done
+    }
+    trap '_err_trap' ERR
+    set -E  # ERR trap inherited by functions/subshells
 
     get_tmux_session_name
     setup_terminal
